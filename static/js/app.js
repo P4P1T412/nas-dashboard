@@ -60,6 +60,22 @@ const ACT = {
   restaurar: ['Restaurar', I.undo, 1], vaciar: ['Vaciar papelera', I.trash, 0]
 };
 
+/* --- Zona de arrastrar y soltar (Drag & Drop) --- */
+const dropZone = document.getElementById('view');
+
+// Prevenir el comportamiento por defecto del navegador (abrir el archivo)
+['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+  dropZone.addEventListener(eventName, e => e.preventDefault());
+});
+
+// Detectar cuando se suelta un archivo dentro de la página
+dropZone.addEventListener('drop', e => {
+  const files = e.dataTransfer.files;
+  if (files.length > 0) {
+    subirArchivosServidor(files); // Función que envía el FormData al backend
+  }
+});
+
 /* ---------- Estado y utilidades ---------- */
 let view = 'inicio', cwd = ROOT, q = '';
 const sel = new Set();
@@ -238,6 +254,33 @@ function run(a) {
     TRASH.length = 0; toast('Papelera vaciada');
   }
   sel.clear(); render();
+}
+
+async function subirArchivosServidor(archivos) {
+  const formData = new FormData();
+  formData.append('path', cwd); // Ruta actual de la carpeta donde se subirá
+
+  for (let i = 0; i < archivos.length; i++) {
+    formData.append('files', archivos[i]);
+  }
+
+  toast('Subiendo archivos...');
+
+  try {
+    const res = await fetch('/api/files/upload', {
+      method: 'POST',
+      body: formData
+    });
+    
+    if (res.ok) {
+      toast('¡Archivos subidos con éxito!');
+      cargarArchivosServidor(); // Recarga la lista de archivos en la pantalla
+    } else {
+      toast('Error al subir los archivos');
+    }
+  } catch (err) {
+    toast('Error de conexión con el NAS');
+  }
 }
 
 /* ---------- Eventos ---------- */
