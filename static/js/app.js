@@ -31,7 +31,6 @@ const FILES = [
   f(10, 'Notas.txt', 'doc', 2e3, { p: ROOT + '/Carpeta 1', d: '2026-04-05' })
 ];
 const TRASH = [];
-const P = { cpu: 23, ram: 6.4, temp: 48 };
 const DISKS = [
   { dev: '/dev/sda1', mp: '/', fs: 'ext4', total: 5e11, used: 2.1e11 },
   { dev: '/dev/sdb1', mp: '/mnt/externo', fs: 'ntfs', total: 2e12, used: 1.75e12 },
@@ -108,8 +107,71 @@ function table(l) {
   return `<div class="row text-white/60 border-t border-white/30 rounded-none"><input id="all" type="checkbox" aria-label="Seleccionar todo"><span>Nombre</span><span class="hidden md:block">Fecha de modificación</span><span>Tamaño</span></div>` + l.map(rowHtml).join('');
 }
 const line = (l, r, extra = '') => `<div class="py-5 border-b border-white/10"><div class="flex justify-between gap-4 ${extra ? 'mb-2' : ''}"><span>${l}</span><span class="text-white/70 text-right">${r}</span></div>${extra}</div>`;
-const perf = () => line('Procesador', P.cpu + ' %', bar(P.cpu)) + line('Memoria RAM', P.ram.toFixed(1) + ' GB de 16 GB', bar(P.ram / 16 * 100)) + line('Temperatura', P.temp + ' °C', bar(P.temp))
-  + '<p class="text-sm text-white/50 mt-4">Datos de ejemplo. Aquí se mostrarán los de /api/system-stats.</p>';
+/* ---------- Rendimiento: datos reales de /api/performance-details ---------- */
+const NPTS = 30; // muestras visibles (30 x 2 s = 1 min)
+const PF = { tab: 'cpu', data: null, err: false, timer: null, h: { cpu: [], ram: [], rx: [], tx: [] } };
+const PF_TABS = [['cpu', 'CPU'], ['ram', 'RAM'], ['disk', 'SSD del sistema'], ['net', 'WiFi']];
+// app.py devuelve velocidades como texto ("12.3 KB/s"); se convierten a bytes/s para graficar
+const spd = t => { const m = /([\d.]+)\s*(B|KB|MB)/.exec(t || ''); return m ? +m[1] * { B: 1, KB: 1024, MB: 1048576 }[m[2]] : 0; };
+const fmtB = b => b < 1024 ? b.toFixed(0) + ' B/s' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB/s' : (b / 1048576).toFixed(1) + ' MB/s';
+const st = (l, v) => `<div><p class="font-semibold">${l}</p><p class="text-white/80 break-all">${esc(String(v))}</p></div>`;
+const grid = a => `<div class="grid sm:grid-cols-2 gap-x-10 gap-y-5 mb-6">${a.join('')}</div>`;
+
+function area(series, o) {
+  const W = 600, H = 220, l = 70, r = 10, t = 12, b = 18, step = (W - l - r) / (NPTS - 1);
+  const max = o.top(Math.max(0, ...series.flatMap(s => s.v)));
+  const y = v => t + (H - t - b) * (1 - v / max);
+  let g = '';
+  for (let i = 0; i <= 4; i++) {
+    const v = max * i / 4, yy = y(v);
+    g += `<line x1="${l}" x2="${W - r}" y1="${yy}" y2="${yy}" stroke="rgba(255,255,255,.18)"/><text x="${l - 8}" y="${yy + 4}" text-anchor="end" fill="rgba(255,255,255,.7)" font-size="12">${o.fmt(v)}</text>`;
+  }
+  const paths = series.map(s => {
+    if (!s.v.length) return '';
+    const x = i => l + (NPTS - s.v.length + i) * step, base = y(0);
+    const pts = s.v.map((v, i) => `${x(i)},${y(v)}`).join(' L');
+    return `<path d="M${x(0)},${base} L${pts} L${x(s.v.length - 1)},${base}Z" fill="${s.c}" fill-opacity="${series.length > 1 ? .55 : .95}" stroke="${s.c}" stroke-width="2"/>`;
+  }).join('');
+  const leg = series.map(s => `<span class="inline-flex items-center gap-2"><span class="w-3 h-3 rounded-full" style="background:${s.c}"></span>${s.n}</span>`).join('');
+  return `<div class="flex justify-center gap-5 text-sm mb-2">${leg}</div><svg viewBox="0 0 ${W} ${H}" class="w-full max-w-3xl mx-auto" role="img" aria-label="${o.label}">${g}${paths}</svg>`;
+}
+function donut(used) {
+  const R = 70, C = 2 * Math.PI * R;
+  return `<svg viewBox="0 0 200 200" class="w-52 h-52 shrink-0" role="img" aria-label="Espacio usado: ${used} %"><g fill="none" stroke-width="34" transform="rotate(-90 100 100)"><circle cx="100" cy="100" r="${R}" stroke="#4f7cff"/><circle cx="100" cy="100" r="${R}" stroke="#f0737a" stroke-dasharray="${C * used / 100} ${C}"/></g><text x="100" y="107" text-anchor="middle" fill="#fff" font-size="22" font-weight="600">${used}%</text></svg>`;
+}
+function drawPerf() {
+  const el = $('pf'); if (!el) return;
+  const d = PF.data;
+  if (!d) { el.innerHTML = `<p class="py-10 text-white/60">${PF.err ? 'No se pudo leer el servidor. Reintentando…' : 'Leyendo datos del sistema…'}</p>`; return; }
+  const { cpu, ram, disk, network: net } = d;
+  const pct = { top: r => Math.min(100, Math.max(20, Math.ceil(r * 1.25 / 10) * 10)), fmt: v => Math.round(v) + '%' };
+  const bps = { top: r => Math.max(1024, r * 1.25), fmt: fmtB };
+  const na = 'No disponible';
+  let h = PF.err ? '<p class="text-amber-300 text-sm mb-3">Sin conexión con el servidor. Reintentando…</p>' : '';
+  if (PF.tab === 'cpu') h += grid([st('Procesos', cpu.processes), st('Velocidad', cpu.frequency_ghz ? cpu.frequency_ghz + ' GHz' : na), st('Núcleos', `${cpu.cores_physical} físicos / ${cpu.cores_logical} lógicos`), st('Tipo de procesador', cpu.model), st('Uso actual', cpu.usage + ' %')])
+    + area([{ n: 'Uso', c: '#f4b96a', v: PF.h.cpu }], { ...pct, label: 'Uso de CPU en el último minuto' });
+  else if (PF.tab === 'ram') h += grid([st('Memoria en uso', `${ram.used_gb} / ${ram.total_gb} GB`), st('Uso actual', ram.percent + ' %'), st('Disponibles', ram.free_gb + ' GB')])
+    + area([{ n: 'Uso', c: '#f0737a', v: PF.h.ram }], { ...pct, label: 'Uso de RAM en el último minuto' });
+  else if (PF.tab === 'disk') h += grid([st('Capacidad real', disk.total_gb + ' GB'), st('Velocidad actual de escritura', disk.write_speed), st('Espacio libre', disk.free_gb + ' GB'), st('Velocidad de lectura', disk.read_speed)])
+    + `<div class="flex flex-wrap items-center justify-center gap-8"><div><p class="text-center mb-2">Uso</p>${donut(disk.percent)}</div><ul class="space-y-2 text-sm"><li class="flex items-center gap-2"><span class="w-3 h-3 rounded-full" style="background:#4f7cff"></span>Libre: ${disk.free_gb} GB</li><li class="flex items-center gap-2"><span class="w-3 h-3 rounded-full" style="background:#f0737a"></span>Usado: ${disk.used_gb} GB</li></ul></div>`;
+  else h += grid([st('Nombre del adaptador', net.adapter || na), st('Envío', net.send_speed), st('SSID', net.ssid || na), st('Recepción', net.recv_speed), st('Dirección IPv4', net.ipv4), st('Dirección IPv6', net.ipv6 || na)])
+    + area([{ n: 'Recepción', c: '#f0737a', v: PF.h.rx }, { n: 'Envío', c: '#4f7cff', v: PF.h.tx }], { ...bps, label: 'Tráfico de red en el último minuto' });
+  el.innerHTML = h;
+}
+async function pollPerf() {
+  try {
+    const r = await fetch('/api/performance-details', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    const push = (k, v) => { PF.h[k].push(v); if (PF.h[k].length > NPTS) PF.h[k].shift(); };
+    push('cpu', d.cpu.usage); push('ram', d.ram.percent); push('rx', spd(d.network.recv_speed)); push('tx', spd(d.network.send_speed));
+    PF.data = d; PF.err = false;
+  } catch (e) { PF.err = true; }
+  if (view === 'rendimiento') drawPerf();
+}
+function perfStart() { drawPerf(); if (!PF.timer) { pollPerf(); PF.timer = setInterval(pollPerf, 2000); } }
+function perfStop() { if (PF.timer) { clearInterval(PF.timer); PF.timer = null; PF.h = { cpu: [], ram: [], rx: [], tx: [] }; } }
+const perf = () => `<div role="tablist" aria-label="Componentes del sistema" class="flex flex-wrap items-center text-sm mt-2 mb-6">${PF_TABS.map(([k, l], i) => `${i ? '<span class="h-4 w-px bg-white/30"></span>' : ''}<button role="tab" data-pf="${k}" aria-selected="${PF.tab === k}" class="px-4 py-1.5 rounded-full ${PF.tab === k ? 'bg-[#1b2a5c] text-white' : 'text-white/60 hover:text-white'}">${l}</button>`).join('')}</div><div id="pf"></div>`;
 const disks = () => DISKS.map(d => line(`${d.mp} <span class="text-white/50 text-sm">${d.dev} · ${d.fs}</span>`, `${fmt(d.used)} de ${fmt(d.total)} (${Math.round(d.used / d.total * 100)} %)`, bar(d.used / d.total * 100))).join('');
 const svc = () => SVC.map(([n, u, on]) => line(`${n} <span class="text-white/50 text-sm">${u}</span>`, `<span class="inline-flex items-center gap-2"><span class="w-2 h-2 rounded-full ${on ? 'bg-emerald-400' : 'bg-white/40'}"></span>${on ? 'Activo' : 'Detenido'}</span>`)).join('');
 function body() {
@@ -138,6 +200,7 @@ function render() {
   $('q').classList.toggle('hidden', !files);
   $('count').classList.toggle('hidden', !files);
   $('view').innerHTML = body();
+  view === 'rendimiento' ? perfStart() : perfStop();
   document.querySelectorAll('[data-v]').forEach(b => {
     const on = b.dataset.v === view;
     b.classList.toggle('on', on);
@@ -179,10 +242,11 @@ function run(a) {
 
 /* ---------- Eventos ---------- */
 document.addEventListener('click', e => {
-  const b = e.target.closest('[data-v],[data-go],[data-act],[data-fav]');
+  const b = e.target.closest('[data-v],[data-go],[data-act],[data-fav],[data-pf]');
   if (!b) return;
   const d = b.dataset;
   if (d.v) setView(d.v);
+  else if (d.pf) { PF.tab = d.pf; $('view').innerHTML = perf(); drawPerf(); $('view').querySelector('[aria-selected=true]').focus(); }
   else if (d.go) { view = 'inicio'; cwd = d.go; sel.clear(); q = ''; $('q').value = ''; render(); }
   else if (d.act) run(d.act);
   else if (d.fav) { const x = FILES.find(y => y.id == d.fav); x.fav = x.fav ? 0 : 1; render(); }
@@ -209,12 +273,6 @@ $('tog').addEventListener('click', () => {
   else $('side').classList.toggle('collapsed');
 });
 $('scrim').addEventListener('click', () => { $('side').classList.remove('open'); $('scrim').classList.add('hidden'); });
-setInterval(() => {
-  if (view !== 'rendimiento') return;
-  P.cpu = Math.max(3, Math.min(95, Math.round(P.cpu + Math.random() * 14 - 7)));
-  P.ram = Math.min(15.5, Math.max(4, P.ram + Math.random() * .4 - .2));
-  $('view').innerHTML = perf();
-}, 2000);
 
 /* ---------- Inicio ---------- */
 $('rail').innerHTML = RAIL.map(([v, l, i]) => `<button class="tile" data-v="${v}" title="${l}" aria-label="${l}">${ic(I[i], 'w-7 h-7')}</button>`).join('');
