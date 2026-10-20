@@ -4,6 +4,11 @@ import os
 
 app = Flask(__name__)
 
+# Ruta principal para cargar la interfaz HTML
+@app.route('/')
+def index():
+    return render_template('index.html')
+
 @app.route('/api/system-stats')
 def system_stats():
     # CPU y RAM
