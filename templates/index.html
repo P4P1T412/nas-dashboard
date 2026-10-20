@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NAS Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={theme:{extend:{fontFamily:{sans:['Outfit','system-ui','sans-serif']}}}}</script>
+<style>
+body{background:#0f1528;color:#fff;color-scheme:dark;min-height:100vh}
+body::before{content:"";position:fixed;inset:0;z-index:-1;background:radial-gradient(60% 50% at 100% 100%,#1d3fc2 0,transparent 70%)}
+:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.grad{background-image:linear-gradient(90deg,#9b3cf7,#fa3f6e)}
+.pill{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem 1rem;border-radius:999px;font-size:.75rem;font-weight:600;background-image:linear-gradient(90deg,#9b3cf7,#fa3f6e)}
+.pill:disabled{opacity:.35;cursor:not-allowed}
+.tile{width:3.5rem;height:3.5rem;border-radius:1rem;display:grid;place-items:center;color:#fff;background-image:linear-gradient(135deg,#f43f7f,#c026d3)}
+.tile.on{color:#3b4cf5}
+.mi{display:block;width:100%;text-align:left;padding:.95rem .5rem;border-bottom:1px solid rgba(255,255,255,.2);font-size:1.05rem}
+.mi:last-child{border-bottom:0}
+.mi.on{font-weight:600;box-shadow:inset 3px 0 #fa3f6e;padding-left:.9rem}
+.row{display:grid;grid-template-columns:1.5rem 1fr 6rem;gap:.75rem;align-items:center;padding:.8rem .5rem;border-radius:.5rem}
+.row.on{background:rgba(255,255,255,.06)}
+input[type=checkbox]{accent-color:#3b4cf5;width:1rem;height:1rem}
+#side{width:19.5rem;transition:width .2s}
+@media(min-width:768px){
+ .row{grid-template-columns:1.5rem 1fr 12rem 7rem}
+ #side.collapsed{width:5rem;padding-inline:.75rem}
+ #side.collapsed #rail{flex-direction:column}
+ #side.collapsed #menu{display:none}
+}
+@media(max-width:767px){
+ #side{position:fixed;inset:0 auto 0 0;z-index:20;background:#0f1528;transform:translateX(-100%);transition:transform .2s}
+ #side.open{transform:none}
+}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body class="font-sans">
+<div class="flex min-h-screen">
+  <aside id="side" class="shrink-0 border-r border-white/20 p-6 flex flex-col gap-10">
+    <div id="rail" class="flex gap-1.5"></div>
+    <nav id="menu" aria-label="Secciones"></nav>
+  </aside>
+  <div id="scrim" class="fixed inset-0 z-10 bg-black/50 hidden"></div>
+
+  <main class="flex-1 min-w-0 p-5 md:p-10 flex flex-col">
+    <header class="flex items-center gap-3">
+      <button id="tog" class="p-2 rounded-lg text-white/70 hover:text-white" aria-label="Mostrar u ocultar el menú"></button>
+      <span class="ml-auto font-semibold">Nombre Usuario</span>
+      <a href="#" class="pill" style="padding:.65rem 1.5rem;font-size:.875rem">Cerrar Sesión</a>
+    </header>
+
+    <h1 id="title" class="text-5xl md:text-6xl font-bold mt-4"></h1>
+    <nav id="path" class="text-sm text-white/60 mt-1 min-h-5" aria-label="Ruta actual"></nav>
+
+    <div class="flex flex-wrap items-center gap-2 mt-8">
+      <div id="acts" class="flex flex-wrap gap-2"></div>
+      <input id="q" type="search" placeholder="Buscar por nombre" aria-label="Buscar por nombre"
+        class="ml-auto w-full sm:w-56 rounded-full bg-white/10 border border-white/20 px-4 py-1.5 text-sm placeholder-white/50">
+    </div>
+
+    <section id="view" class="mt-4 flex-1"></section>
+    <p id="count" class="text-sm text-white/60 mt-4"></p>
+  </main>
+</div>
+
+<div id="toast" role="status" aria-live="polite" class="hidden fixed bottom-5 right-5 z-30 rounded-xl bg-white text-slate-900 px-4 py-2 text-sm font-medium shadow-lg"></div>
+<input id="up" type="file" multiple hidden>
+<script src="static/js/app.js"></script>
+</body>
+</html>
