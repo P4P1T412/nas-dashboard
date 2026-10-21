@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template, request, send_from_directory, abort
+from flask import Flask, jsonify, render_template, request, send_from_directory, send_file, abort
 import psutil
 import platform
 import socket
@@ -462,6 +462,20 @@ def copy_files():
             else:
                 shutil.copy(abs_p, new_p)
     return jsonify({'success': True})
+
+@app.route('/api/files/stream', methods=['GET'])
+def stream_file():
+    # Sirve imágenes y videos; conditional=True activa las peticiones Range (adelantar/retroceder sin descargar todo)
+    root = drive_root(request.args.get('drive'))
+    if not root:
+        return jsonify(NO_DRIVE[0]), NO_DRIVE[1]
+    abs_p = safe_path(request.args.get('path', ''), root)
+    if abs_p == root or not os.path.isfile(abs_p):
+        return jsonify({'error': 'Archivo no encontrado'}), 404
+    resp = send_file(abs_p, conditional=True, max_age=0)
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['Content-Security-Policy'] = 'sandbox'  # un SVG/HTML subido no puede ejecutar scripts
+    return resp
 
 def unique_dest(folder, name, tag):
     base, ext = os.path.splitext(name)

@@ -17,7 +17,17 @@ const I = {
   paste: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>',
   drive: '<rect x="2" y="13" width="20" height="8" rx="2"/><path d="M5 13l2.5-9h9L19 13M6 17h.01M10 17h.01"/>',
   back: '<path d="M19 12H5M12 19l-7-7 7-7"/>',
-  fwd: '<path d="M5 12h14M12 5l7 7-7 7"/>'
+  fwd: '<path d="M5 12h14M12 5l7 7-7 7"/>',
+  close: '<path d="M18 6L6 18M6 6l12 12"/>',
+  play: '<path d="M6 4l14 8-14 8z" fill="currentColor"/>',
+  pause: '<path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor"/>',
+  expand: '<path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>',
+  zin: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/>',
+  zout: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6"/>',
+  eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>',
+  playc: '<circle cx="12" cy="12" r="10"/><path d="M10 8l6 4-6 4z"/>',
+  rew: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>',
+  ff: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/>'
 };
 
 /* ---------- Estado y variables globales ---------- */
@@ -106,11 +116,12 @@ function rowHtml(x) {
     ? `<button class="truncate text-left hover:underline font-medium" data-go="${esc(x.p)}">${esc(x.n)}</button>`
     : `<span class="truncate">${esc(x.n)}</span>`;
   const star = trash || isDrv() ? '' : `<button data-fav="${esc(x.p)}" aria-pressed="${!!x.fav}" class="shrink-0 ${x.fav ? 'text-yellow-300' : 'text-white/30 hover:text-white'}" aria-label="${x.fav ? 'Quitar de favoritos' : 'Marcar como favorito'}: ${esc(x.n)}">${ic(I.star, 'w-4 h-4' + (x.fav ? ' fill-current' : ''))}</button>`;
+  const openBtn = trash || (x.t !== 'img' && x.t !== 'vid') ? '' : `<button data-open="${esc(x.p)}" class="shrink-0 text-white/50 hover:text-white" aria-label="${x.t === 'vid' ? 'Reproducir' : 'Ver'}: ${esc(x.n)}" title="${x.t === 'vid' ? 'Reproducir' : 'Ver imagen'}">${ic(x.t === 'vid' ? I.playc : I.eye, 'w-4 h-4')}</button>`;
   const loc = trash ? (x.dr && x.dr !== 'sistema' ? `${x.dn}: ${x.o}` : x.o) : (x.p.slice(0, x.p.lastIndexOf('/')) || '/');
   const where = view === 'inicio' || isDrv() ? '' : `<span class="hidden lg:inline truncate text-xs text-white/40">${trash ? 'de' : 'en'} ${esc(loc)}</span>`;
-  return `<div class="row hover:bg-white/5 ${sel.has(x.p) ? 'on' : ''}">
+  return `<div class="row select-none hover:bg-white/5 ${sel.has(x.p) ? 'on' : ''}" data-p="${esc(x.p)}">
     <input type="checkbox" data-sel="${esc(x.p)}" ${sel.has(x.p) ? 'checked' : ''} aria-label="Seleccionar ${esc(x.n)}">
-    <div class="flex items-center gap-2 min-w-0">${ic(I[x.t] || I.doc)}${name}${star}${where}</div>
+    <div class="flex items-center gap-2 min-w-0">${ic(I[x.t] || I.doc)}${name}${openBtn}${star}${where}</div>
     <span class="hidden md:block text-white/90">${fd(x.d)}</span>
     <span class="text-white/90">${x.t === 'dir' ? '--' : fmt(x.s)}</span></div>`;
 }
@@ -322,8 +333,135 @@ async function uploadFiles(filesList) {
 }
 
 /* ---------- Delegación de Eventos ---------- */
+/* ---------- Visor de imágenes y videos ---------- */
+document.head.insertAdjacentHTML('beforeend', '<style>#vbox:fullscreen{max-width:none;max-height:none;height:100%;border-radius:0;border:0}#vbox:fullscreen video{max-height:none;height:calc(100vh - 7rem)}#vbox:fullscreen img{max-height:calc(100vh - 6rem)}</style>');
+let VW = null;
+const VB = 'relative shrink-0 p-2 rounded-lg text-white/80 hover:text-white hover:bg-white/10';
+const mediaUrl = p => `/api/files/stream?drive=${encodeURIComponent(curDrive())}&path=${encodeURIComponent(p)}`;
+const fmtT = s => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), c = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(c).padStart(2, '0'); };
+const tag10 = '<span class="absolute inset-0 grid place-items-center text-[9px] font-bold pointer-events-none">10</span>';
+
+function closeViewer() {
+  if (!VW) return;
+  const v = VW.ov.querySelector('video');
+  if (v) { v.pause(); v.removeAttribute('src'); v.load(); } // corta la descarga en curso
+  if (document.fullscreenElement) document.exitFullscreen();
+  document.removeEventListener('keydown', VW.key);
+  document.body.style.overflow = '';
+  VW.ov.remove();
+  if (VW.opener && VW.opener.isConnected) VW.opener.focus();
+  VW = null;
+}
+
+function setupVideo(ov, toggleFs) {
+  const q = s => ov.querySelector(s), v = q('video'), pp = q('[data-pp]'), sk = q('[data-seek]');
+  const skip = d => { if (v.duration) v.currentTime = Math.min(v.duration, Math.max(0, v.currentTime + d)); };
+  const toggle = () => v.paused ? v.play().catch(() => {}) : v.pause();
+  const icon = () => pp.innerHTML = ic(v.paused ? I.play : I.pause, 'w-6 h-6');
+  let seeking = false;
+  icon();
+  ['play', 'pause', 'ended'].forEach(ev => v.addEventListener(ev, icon));
+  v.addEventListener('loadedmetadata', () => q('[data-dur]').textContent = fmtT(v.duration));
+  v.addEventListener('timeupdate', () => { q('[data-cur]').textContent = fmtT(v.currentTime); if (!seeking && v.duration) sk.value = v.currentTime / v.duration * 1000; });
+  v.addEventListener('error', () => { const m = q('[data-err]'); m.textContent = 'Este navegador no puede reproducir este video. Prueba con MP4 (H.264) o WebM.'; m.classList.remove('hidden'); });
+  sk.addEventListener('input', () => { seeking = true; if (v.duration) v.currentTime = sk.value / 1000 * v.duration; });
+  sk.addEventListener('change', () => seeking = false);
+  q('[data-b10]').onclick = () => skip(-10);
+  q('[data-f10]').onclick = () => skip(10);
+  pp.onclick = v.onclick = toggle;
+  v.ondblclick = toggleFs;
+  v.play().catch(() => {});
+  return e => {
+    const free = !['BUTTON', 'INPUT'].includes(e.target.tagName);
+    if (e.key === ' ' && free) { e.preventDefault(); toggle(); }
+    else if (e.key === 'ArrowLeft' && e.target.tagName !== 'INPUT') skip(-10);
+    else if (e.key === 'ArrowRight' && e.target.tagName !== 'INPUT') skip(10);
+  };
+}
+
+function setupImage(ov) {
+  const q = s => ov.querySelector(s), img = q('[data-img]'), wrap = q('[data-wrap]'), lab = q('[data-zl]');
+  let sc = 1, tx = 0, ty = 0, drag = null;
+  const apply = () => {
+    if (sc <= 1) tx = ty = 0;
+    img.style.transform = `translate(${tx}px,${ty}px) scale(${sc})`;
+    lab.textContent = Math.round(sc * 100) + '%';
+    wrap.style.cursor = drag ? 'grabbing' : sc > 1 ? 'grab' : 'default';
+  };
+  const zoom = f => { sc = Math.min(8, Math.max(1, sc * f)); apply(); };
+  q('[data-zi]').onclick = () => zoom(1.25);
+  q('[data-zo]').onclick = () => zoom(0.8);
+  lab.onclick = () => { sc = 1; apply(); };
+  wrap.addEventListener('wheel', e => { e.preventDefault(); zoom(Math.exp(-e.deltaY * 0.0015)); }, { passive: false });
+  img.addEventListener('dblclick', () => { sc = sc > 1 ? 1 : 2.5; apply(); });
+  wrap.addEventListener('pointerdown', e => { if (sc > 1) { drag = { x: e.clientX - tx, y: e.clientY - ty }; wrap.setPointerCapture(e.pointerId); apply(); } });
+  wrap.addEventListener('pointermove', e => { if (drag) { tx = e.clientX - drag.x; ty = e.clientY - drag.y; apply(); } });
+  wrap.addEventListener('pointerup', () => { drag = null; apply(); });
+  img.addEventListener('error', () => { const m = q('[data-err]'); m.textContent = 'No se pudo cargar la imagen.'; m.classList.remove('hidden'); });
+  return e => {
+    if (e.key === '+' || e.key === '=') zoom(1.25);
+    else if (e.key === '-') zoom(0.8);
+    else if (e.key === '0') { sc = 1; apply(); }
+  };
+}
+
+function openViewer(x) {
+  closeViewer();
+  const isVid = x.t === 'vid', opener = document.activeElement, url = mediaUrl(x.p);
+  const ov = document.createElement('div');
+  ov.className = 'fixed inset-0 z-40 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 md:p-6';
+  ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true'); ov.setAttribute('aria-label', x.n);
+  const fsBtn = `<button data-fs class="${VB}" aria-label="Pantalla completa" title="Pantalla completa (F)">${ic(I.expand, 'w-5 h-5')}</button>`;
+  const xBtn = `<button data-vx class="${VB}" aria-label="Cerrar" title="Cerrar (Esc)">${ic(I.close, 'w-6 h-6')}</button>`;
+  const err = '<p data-err class="hidden absolute inset-0 grid place-items-center p-6 text-center text-white/80 bg-black/70"></p>';
+  const zoomBtns = `<button data-zo class="${VB}" aria-label="Alejar" title="Alejar (-)">${ic(I.zout, 'w-5 h-5')}</button><button data-zl class="px-2 text-sm tabular-nums text-white/80 hover:text-white" title="Restablecer zoom (0)">100%</button><button data-zi class="${VB}" aria-label="Acercar" title="Acercar (+)">${ic(I.zin, 'w-5 h-5')}</button>`;
+  ov.innerHTML = `<div id="vbox" class="w-full max-w-5xl max-h-full flex flex-col rounded-2xl border border-white/10 bg-[#0f1528] overflow-hidden">
+    <div class="flex items-center gap-1 px-4 py-2"><span class="font-semibold truncate flex-1 mr-2">${esc(x.n)}</span>${isVid ? '' : zoomBtns + fsBtn}${xBtn}</div>`
+    + (isVid
+      ? `<div class="relative flex-1 min-h-0 bg-black flex items-center justify-center"><video src="${url}" preload="metadata" playsinline class="w-full max-h-[70vh] cursor-pointer"></video>${err}</div>
+         <div class="flex items-center gap-1 px-3 py-2">
+           <button data-b10 class="${VB}" aria-label="Retroceder 10 segundos" title="Retroceder 10 s (←)">${ic(I.rew, 'w-6 h-6')}${tag10}</button>
+           <button data-pp class="${VB}" aria-label="Reproducir o pausar" title="Reproducir / pausar (Espacio)"></button>
+           <button data-f10 class="${VB}" aria-label="Adelantar 10 segundos" title="Adelantar 10 s (→)">${ic(I.ff, 'w-6 h-6')}${tag10}</button>
+           <span data-cur class="w-12 text-center text-xs tabular-nums text-white/70">0:00</span>
+           <input data-seek type="range" min="0" max="1000" step="1" value="0" aria-label="Progreso del video" class="flex-1 min-w-0 accent-pink-500">
+           <span data-dur class="w-12 text-center text-xs tabular-nums text-white/70">0:00</span>${fsBtn}
+         </div>`
+      : `<div data-wrap class="relative flex-1 min-h-0 bg-black/60 overflow-hidden flex items-center justify-center touch-none"><img data-img src="${url}" alt="${esc(x.n)}" draggable="false" class="max-w-full max-h-[78vh] object-contain select-none">${err}</div>`)
+    + '</div>';
+  document.body.appendChild(ov);
+  document.body.style.overflow = 'hidden';
+  const box = ov.firstElementChild;
+  const toggleFs = () => document.fullscreenElement ? document.exitFullscreen()
+    : box.requestFullscreen ? box.requestFullscreen() : ov.querySelector('video')?.webkitEnterFullscreen?.();
+  const onKey = isVid ? setupVideo(ov, toggleFs) : setupImage(ov);
+  const key = e => {
+    if (e.key === 'Escape' && !document.fullscreenElement) closeViewer();
+    else if (e.key === 'f' || e.key === 'F') toggleFs();
+    else onKey(e);
+  };
+  ov.querySelector('[data-fs]').onclick = toggleFs;
+  ov.querySelector('[data-vx]').onclick = closeViewer;
+  ov.addEventListener('click', e => { if (e.target === ov) closeViewer(); });
+  document.addEventListener('keydown', key);
+  VW = { ov, key, opener };
+  ov.querySelector('[data-vx]').focus();
+}
+
+function openItem(p) {
+  const x = SERVER_FILES.find(y => y.p === p);
+  if (!x || view === 'papelera') return;
+  if (x.t === 'dir') navTo({ view: isDrv() ? 'unidades' : 'inicio', cwd: x.p, drv: isDrv() ? drv : null, dn: isDrv() ? drvName : '' });
+  else if (x.t === 'img' || x.t === 'vid') openViewer(x);
+  else toast('Este tipo de archivo no tiene vista previa.');
+}
+document.addEventListener('dblclick', e => {
+  const r = e.target.closest('.row[data-p]');
+  if (r && !e.target.closest('button,input')) openItem(r.dataset.p);
+});
+
 document.addEventListener('click', e => {
-  const b = e.target.closest('[data-v],[data-go],[data-act],[data-pf],[data-fav],[data-drv]');
+  const b = e.target.closest('[data-v],[data-go],[data-act],[data-pf],[data-fav],[data-drv],[data-open]');
   if (!b) return;
   const d = b.dataset;
   if (d.v) setView(d.v);
@@ -332,6 +470,7 @@ document.addEventListener('click', e => {
   else if (d.drv) { const x = SERVER_FILES.find(y => y.id === d.drv); if (x) navTo({ view: 'unidades', cwd: '/', drv: x.id, dn: x.name }); }
   else if (d.act) run(d.act);
   else if (d.fav) toggleFav(d.fav);
+  else if (d.open) openItem(d.open);
 });
 
 document.addEventListener('change', e => {
