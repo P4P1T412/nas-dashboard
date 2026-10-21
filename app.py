@@ -147,12 +147,20 @@ def performance_details():
 # --- APIS DE EXPLORADOR DE ARCHIVOS (CRUD) ---
 
 # --- UNIDADES DE ALMACENAMIENTO ---
-# Dentro de Docker solo se ven las unidades montadas en el contenedor:
-# monta /media y /mnt del host con -v /media:/media:rslave -v /mnt:/mnt:rslave
-DRIVE_DIRS = [d for d in os.environ.get('DRIVE_DIRS', '/media:/mnt:/run/media').split(':') if d]
+# Una unidad es cualquier disco/partición montada que no sea del sistema operativo.
+# Dentro de Docker solo se ven las montadas en el contenedor: usa
+#   -v /media:/media:rslave -v /mnt:/mnt:rslave
+SYS_BLOCK = os.environ.get('SYS_BLOCK', '/sys/block')
+SYSTEM_DIRS = ('/boot', '/etc', '/proc', '/sys', '/dev', '/snap', '/var', '/usr', '/tmp', '/run')
+BASE_DIRS = ('/media', '/mnt', '/run/media')
 
 def _under(path, base):
     return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+def _is_candidate(mp):
+    if mp == '/' or mp in BASE_DIRS or not os.path.isdir(mp):
+        return False  # los montajes de archivos sueltos (/etc/hosts...) y las carpetas base no son unidades
+    return _under(mp, '/run/media') or not any(_under(mp, d) for d in SYSTEM_DIRS)
 
 def detect_drives():
     parts = psutil.disk_partitions(all=False)
@@ -160,13 +168,48 @@ def detect_drives():
                key=lambda p: len(p.mountpoint), default=None)
     drives = [{'id': 'sistema', 'name': 'Almacenamiento principal', 'kind': 'sistema', 'root': STORAGE_ROOT,
                'device': main.device if main else '', 'fstype': main.fstype if main else ''}]
+    seen = {main.device} if main else set()
     for p in parts:
         mp = os.path.normpath(p.mountpoint)
-        if _under(STORAGE_ROOT, mp) or mp in DRIVE_DIRS or not any(_under(mp, b) for b in DRIVE_DIRS):
+        if p.device in seen or _under(STORAGE_ROOT, mp) or _under(mp, STORAGE_ROOT) or not _is_candidate(mp):
             continue
+        seen.add(p.device)
         drives.append({'id': hashlib.sha1(mp.encode()).hexdigest()[:8], 'name': os.path.basename(mp) or mp,
                        'kind': 'externa', 'root': mp, 'device': p.device, 'fstype': p.fstype})
     return drives
+
+def _read(path):
+    try:
+        with open(path, 'r') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+def unmounted_devices():
+    # Discos/particiones que el kernel ve pero que nadie ha montado (así se avisa en vez de ignorarlos)
+    mounted = {os.path.basename(p.device) for p in psutil.disk_partitions(all=True)}
+    swaps = {os.path.basename(l.split()[0]) for l in _read('/proc/swaps').splitlines()[1:] if l.strip()}
+    out = []
+    try:
+        disks = sorted(os.listdir(SYS_BLOCK))
+    except OSError:
+        return out
+    for disk in disks:
+        if disk.startswith(('loop', 'ram', 'zram', 'sr', 'fd', 'dm-', 'md', 'nbd')):
+            continue
+        base = os.path.join(SYS_BLOCK, disk)
+        parts = sorted(n for n in os.listdir(base) if n.startswith(disk) and os.path.exists(os.path.join(base, n, 'partition'))) or [disk]
+        if any(n in mounted for n in parts + [disk]):
+            continue  # el disco ya tiene algo montado (p. ej. el del sistema)
+        model = _read(os.path.join(base, 'device', 'model'))
+        for n in parts:
+            path = base if n == disk else os.path.join(base, n)
+            size = int(_read(os.path.join(path, 'size')) or 0) * 512
+            holders = os.path.join(path, 'holders')
+            if size < 64 * 1024 ** 2 or n in swaps or (os.path.isdir(holders) and os.listdir(holders)):
+                continue
+            out.append({'name': n, 'model': model, 'total': size})
+    return out
 
 def drive_root(drive_id):
     if not drive_id or drive_id == 'sistema':
@@ -186,7 +229,10 @@ def drives_list():
         out.append({'id': d['id'], 'name': d['name'], 'kind': d['kind'], 'device': d['device'], 'fstype': d['fstype'],
                     'mount': '' if d['kind'] == 'sistema' else d['root'],
                     'total': u.total, 'used': u.used, 'free': u.free, 'percent': u.percent})
-    return jsonify({'items': out})
+    for n in unmounted_devices():
+        out.append({'id': 'dev:' + n['name'], 'name': n['name'], 'kind': 'sin_montar', 'device': '/dev/' + n['name'],
+                    'model': n['model'], 'fstype': '', 'mount': '', 'total': n['total'], 'used': 0, 'free': 0, 'percent': 0})
+    return jsonify({'items': out, 'docker': os.path.exists('/.dockerenv')})
 
 def safe_path(subpath, root=None):
     # Evita saltos de directorio y el acceso a la carpeta interna .nas

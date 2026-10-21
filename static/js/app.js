@@ -24,7 +24,7 @@ const I = {
 let view = 'inicio', cwd = '/', q = '';
 let drv = null, drvName = '', homeCwd = '/', CLIP = null, HIST = [], hpos = -1;
 let SERVER_FILES = [];
-let loading = false, loadTok = 0;
+let loading = false, loadTok = 0, DOCKER = false;
 const isDrv = () => view === 'unidades' && !!drv;                 // dentro de una unidad
 const curDrive = () => (view === 'unidades' && drv) || 'sistema';
 const isFiles = () => view === 'unidades' ? isDrv() : (!VIEWS[view].k || VIEWS[view].k === 'trash');
@@ -82,6 +82,7 @@ async function loadFiles() {
     const data = await res.json();
     if (tok !== loadTok) return; // ya se cambió de sección
     SERVER_FILES = data.items || [];
+    if (view === 'unidades' && !drv) DOCKER = !!data.docker;
   } catch (err) {
     if (tok !== loadTok) return;
     SERVER_FILES = [];
@@ -190,9 +191,10 @@ function perfStop() { if (PF.timer) { clearInterval(PF.timer); PF.timer = null; 
 
 const perf = () => `<div role="tablist" aria-label="Componentes del sistema" class="flex flex-wrap items-center text-sm mb-6">${PF_TABS.map(([k, l], n) => `${n ? '<span class="h-4 w-px bg-white/30"></span>' : ''}<button role="tab" data-pf="${k}" aria-selected="${PF.tab === k}" class="px-4 py-1.5 rounded-full ${PF.tab === k ? 'bg-[#1b2a5c] text-white' : 'text-white/60 hover:text-white'}">${l}</button>`).join('')}</div><div id="pf"></div>`;
 
+const unmountedCard = d => `<div class="rounded-xl px-3 py-5 border-b border-white/10 flex items-center gap-4">${ic(I.drive, 'w-9 h-9 shrink-0 text-white/50')}<div class="flex-1 min-w-0"><div class="flex justify-between gap-4"><span class="font-semibold truncate">${esc(d.name)} <span class="ml-2 text-xs font-normal rounded-full bg-amber-400/20 text-amber-300 px-2 py-0.5">Sin montar</span></span><span class="text-white/70 text-sm shrink-0">${fmt(d.total)}</span></div><p class="text-xs text-white/50 mb-2 truncate">${esc(d.model || 'Disco')} · ${esc(d.device)}</p><p class="text-xs text-white/60 mb-1">Está conectada, pero aún no está montada${DOCKER ? ' (o el contenedor no la ve)' : ''}. En Debian ejecuta:</p><code class="block text-xs bg-white/10 rounded px-2 py-1 select-all break-all">sudo mkdir -p /mnt/disco &amp;&amp; sudo mount ${esc(d.device)} /mnt/disco</code>${DOCKER ? '<p class="text-xs text-white/60 mt-2">Si ya está montada en Debian, reinicia el contenedor con <code class="select-all">-v /mnt:/mnt:rslave -v /media:/media:rslave</code>.</p>' : ''}</div></div>`;
 const drivesHtml = () => !SERVER_FILES.length
   ? `<p class="py-10 text-white/60">${loading ? 'Buscando unidades…' : 'No se detectó ninguna unidad.'}</p>`
-  : SERVER_FILES.map(d => `<button data-drv="${esc(d.id)}" class="w-full text-left rounded-xl px-3 py-5 border-b border-white/10 hover:bg-white/5 flex items-center gap-4">${ic(I.drive, 'w-9 h-9 shrink-0')}<div class="flex-1 min-w-0"><div class="flex justify-between gap-4"><span class="font-semibold truncate">${esc(d.name)}</span><span class="text-white/70 text-sm shrink-0">${fmt(d.free)} libres de ${fmt(d.total)}</span></div><p class="text-xs text-white/50 mb-2 truncate">${d.kind === 'sistema' ? 'Almacenamiento del sistema' : 'Unidad externa'} · ${esc(d.fstype || 'sin formato')} · ${esc(d.device || d.mount)}</p>${bar(d.percent)}</div></button>`).join('')
+  : SERVER_FILES.map(d => d.kind === 'sin_montar' ? unmountedCard(d) : `<button data-drv="${esc(d.id)}" class="w-full text-left rounded-xl px-3 py-5 border-b border-white/10 hover:bg-white/5 flex items-center gap-4">${ic(I.drive, 'w-9 h-9 shrink-0')}<div class="flex-1 min-w-0"><div class="flex justify-between gap-4"><span class="font-semibold truncate">${esc(d.name)}</span><span class="text-white/70 text-sm shrink-0">${fmt(d.free)} libres de ${fmt(d.total)}</span></div><p class="text-xs text-white/50 mb-2 truncate">${d.kind === 'sistema' ? 'Almacenamiento del sistema' : 'Unidad externa'} · ${esc(d.fstype || 'sin formato')} · ${esc(d.device || d.mount)}</p>${bar(d.percent)}</div></button>`).join('')
     + '<p class="text-xs text-white/40 mt-4">La lista se actualiza sola al conectar o quitar una unidad.</p>';
 
 function body() {
