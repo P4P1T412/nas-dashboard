@@ -256,6 +256,7 @@ function run(a) {
   sel.clear(); render();
 }
 
+// Función para subir archivos al servidor usando fetch y FormData
 async function subirArchivosServidor(archivos) {
   const formData = new FormData();
   formData.append('path', cwd); // Ruta actual de la carpeta donde se subirá
