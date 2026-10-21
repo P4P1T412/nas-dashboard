@@ -19,6 +19,8 @@ const I = {
 /* ---------- Estado y variables globales ---------- */
 let view = 'inicio', cwd = '/', q = '';
 let SERVER_FILES = [];
+let loading = false, loadTok = 0;
+const isFiles = v => !VIEWS[v].k || VIEWS[v].k === 'trash';
 const sel = new Set();
 const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fd = d => d.split('-').reverse().join('/');
@@ -44,59 +46,73 @@ const VIEWS = {
   videos: { t: 'Videos', a: ['copiar', 'eliminar'] },
   recientes: { t: 'Recientes', a: ['copiar', 'eliminar'] },
   todos: { t: 'Todos los archivos', a: ['copiar', 'eliminar'] },
-  papelera: { t: 'Papelera', k: 'trash', a: ['restaurar', 'vaciar'] },
+  papelera: { t: 'Papelera', k: 'trash', a: ['restaurar', 'borrar', 'vaciar'] },
   rendimiento: { t: 'Rendimiento', k: 'perf' },
   unidades: { t: 'Unidades de almacenamiento', k: 'disks' }
 };
 const ACT = {
   crear: ['Crear', I.plus, 0], copiar: ['Copiar', I.copy, 1], subir: ['Subir', I.up, 0], mover: ['Mover', I.move, 1],
   eliminar: ['Eliminar', I.trash, 1], agregar: ['Agregar', I.plus, 0], quitar: ['Eliminar de Favoritos', I.trash, 1],
-  restaurar: ['Restaurar', I.undo, 1], vaciar: ['Vaciar papelera', I.trash, 0]
+  restaurar: ['Restaurar', I.undo, 1], borrar: ['Eliminar definitivamente', I.trash, 1], vaciar: ['Vaciar papelera', I.trash, 0]
 };
 
 /* ---------- Cargar Archivos desde el Backend ---------- */
+const SRC = {
+  recientes: '/api/files/recent', todos: '/api/files/all', imagenes: '/api/files/all?type=img',
+  videos: '/api/files/all?type=vid', favoritos: '/api/favorites', papelera: '/api/trash/list'
+};
+
 async function loadFiles() {
+  const tok = ++loadTok;
+  loading = true;
+  const url = SRC[view] || `/api/files/list?path=${encodeURIComponent(cwd)}`;
+  let failed = false;
   try {
-    const res = await fetch(`/api/files/list?path=${encodeURIComponent(cwd)}`);
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error('Error al leer archivos');
     const data = await res.json();
+    if (tok !== loadTok) return; // ya se cambió de sección
     SERVER_FILES = data.items || [];
-    render();
   } catch (err) {
+    if (tok !== loadTok) return;
     SERVER_FILES = [];
-    render();
-    toast('No se pudieron cargar los archivos del servidor');
+    failed = true;
   }
+  loading = false;
+  for (const p of [...sel]) if (!SERVER_FILES.some(x => x.p === p)) sel.delete(p);
+  render();
+  if (failed) toast('No se pudieron cargar los archivos del servidor');
 }
 
-function items() {
-  let a = SERVER_FILES;
-  if (view === 'imagenes') a = a.filter(x => x.t === 'img');
-  else if (view === 'videos') a = a.filter(x => x.t === 'vid');
-  
+const items = () => {
   const s = q.trim().toLowerCase();
-  return s ? a.filter(x => x.n.toLowerCase().includes(s)) : a;
-}
+  return s ? SERVER_FILES.filter(x => x.n.toLowerCase().includes(s)) : SERVER_FILES;
+};
 
 /* ---------- Renderizado de la Tabla ---------- */
 function rowHtml(x) {
-  const name = x.t === 'dir'
+  const trash = view === 'papelera';
+  const name = x.t === 'dir' && !trash
     ? `<button class="truncate text-left hover:underline font-medium" data-go="${esc(x.p)}">${esc(x.n)}</button>`
     : `<span class="truncate">${esc(x.n)}</span>`;
-  
-  return `<div class="row ${sel.has(x.p) ? 'on' : ''}">
+  const star = trash ? '' : `<button data-fav="${esc(x.p)}" aria-pressed="${!!x.fav}" class="shrink-0 ${x.fav ? 'text-yellow-300' : 'text-white/30 hover:text-white'}" aria-label="${x.fav ? 'Quitar de favoritos' : 'Marcar como favorito'}: ${esc(x.n)}">${ic(I.star, 'w-4 h-4' + (x.fav ? ' fill-current' : ''))}</button>`;
+  const loc = trash ? x.o : (x.p.slice(0, x.p.lastIndexOf('/')) || '/');
+  const where = view === 'inicio' ? '' : `<span class="hidden lg:inline truncate text-xs text-white/40">${trash ? 'de' : 'en'} ${esc(loc)}</span>`;
+  return `<div class="row hover:bg-white/5 ${sel.has(x.p) ? 'on' : ''}">
     <input type="checkbox" data-sel="${esc(x.p)}" ${sel.has(x.p) ? 'checked' : ''} aria-label="Seleccionar ${esc(x.n)}">
-    <div class="flex items-center gap-2 min-w-0">${ic(I[x.t] || I.doc)}${name}</div>
+    <div class="flex items-center gap-2 min-w-0">${ic(I[x.t] || I.doc)}${name}${star}${where}</div>
     <span class="hidden md:block text-white/90">${fd(x.d)}</span>
     <span class="text-white/90">${x.t === 'dir' ? '--' : fmt(x.s)}</span></div>`;
 }
 
 function table(l) {
+  const trash = view === 'papelera';
   if (!l.length) {
-    const m = q ? `Ningún resultado para “${esc(q)}”.` : 'Esta carpeta está vacía. Usa Crear o Subir para añadir contenido.';
+    const msgs = { papelera: 'La papelera está vacía.', favoritos: 'Aún no tienes favoritos. Marca la estrella junto a un archivo o carpeta.', inicio: 'Esta carpeta está vacía. Usa Crear o Subir para añadir contenido.' };
+    const m = loading ? 'Cargando…' : q ? `Ningún resultado para “${esc(q)}”.` : (msgs[view] || 'No hay elementos que mostrar aquí.');
     return `<p class="py-10 text-white/60">${m}</p>`;
   }
-  return `<div class="row text-white/60 border-t border-white/30 rounded-none"><input id="all" type="checkbox" aria-label="Seleccionar todo"><span>Nombre</span><span class="hidden md:block">Fecha de modificación</span><span>Tamaño</span></div>` + l.map(rowHtml).join('');
+  return `<div class="row text-white/60 border-t border-white/30 rounded-none"><input id="all" type="checkbox" aria-label="Seleccionar todo"><span>Nombre</span><span class="hidden md:block">${trash ? 'Fecha de eliminación' : 'Fecha de modificación'}</span><span>Tamaño</span></div>` + l.map(rowHtml).join('');
 }
 
 /* ---------- Rendimiento Real ---------- */
@@ -160,9 +176,9 @@ async function pollPerf() {
 }
 
 function perfStart() { drawPerf(); if (!PF.timer) { pollPerf(); PF.timer = setInterval(pollPerf, 2000); } }
-function perfStop() { if (PF.timer) { clearInterval(PF.timer); PF.timer = null; } }
+function perfStop() { if (PF.timer) { clearInterval(PF.timer); PF.timer = null; PF.h = { cpu: [], ram: [], rx: [], tx: [] }; } }
 
-const perf = () => `<div class="flex gap-2 mb-6">${PF_TABS.map(([k, l]) => `<button data-pf="${k}" class="px-4 py-1.5 rounded-full ${PF.tab === k ? 'bg-[#1b2a5c] text-white' : 'text-white/60'}">${l}</button>`).join('')}</div><div id="pf"></div>`;
+const perf = () => `<div role="tablist" aria-label="Componentes del sistema" class="flex flex-wrap items-center text-sm mb-6">${PF_TABS.map(([k, l], n) => `${n ? '<span class="h-4 w-px bg-white/30"></span>' : ''}<button role="tab" data-pf="${k}" aria-selected="${PF.tab === k}" class="px-4 py-1.5 rounded-full ${PF.tab === k ? 'bg-[#1b2a5c] text-white' : 'text-white/60 hover:text-white'}">${l}</button>`).join('')}</div><div id="pf"></div>`;
 
 function body() {
   const k = VIEWS[view].k;
@@ -179,64 +195,73 @@ function sync() {
   const n = sel.size;
   $('count').textContent = `Seleccionados: ${n} elemento${n === 1 ? '' : 's'}`;
   document.querySelectorAll('[data-need]').forEach(b => b.disabled = !n);
+  const all = $('all'), l = items();
+  if (all) all.checked = l.length > 0 && l.every(x => sel.has(x.p));
 }
 
 function render() {
-  const v = VIEWS[view], files = !v.k;
+  const v = VIEWS[view], files = isFiles(view);
   $('title').textContent = v.t;
+  document.title = v.t + ' - NAS Dashboard';
   $('path').innerHTML = view === 'inicio' ? crumbs() : '';
   $('acts').innerHTML = (v.a || []).map(a => { const [l, i, n] = ACT[a]; return `<button class="pill" data-act="${a}" ${n ? 'data-need disabled' : ''}>${ic(i, 'w-4 h-4')}${l}</button>`; }).join('');
+  $('q').classList.toggle('hidden', !files);
+  $('count').classList.toggle('hidden', !files);
   $('view').innerHTML = body();
   view === 'rendimiento' ? perfStart() : perfStop();
+  document.querySelectorAll('[data-v]').forEach(b => {
+    const on = b.dataset.v === view;
+    b.classList.toggle('on', on);
+    on ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current');
+  });
   sync();
 }
 
 function setView(v) {
   view = v; sel.clear(); q = ''; $('q').value = '';
-  if (v === 'inicio') loadFiles();
-  else render();
+  $('side').classList.remove('open'); $('scrim').classList.add('hidden');
+  SERVER_FILES = []; loadTok++; loading = false;
+  if (isFiles(v)) loadFiles();
+  render();
 }
 
 /* ---------- Acciones Reales contra la API de Flask ---------- */
-async function run(a) {
+async function act(url, body, ok) {
+  try {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error();
+    sel.clear(); toast(ok); loadFiles();
+  } catch (e) { toast('No se pudo completar la acción'); }
+}
+
+async function toggleFav(p) {
+  const x = SERVER_FILES.find(y => y.p === p);
+  if (!x) return;
+  const want = !x.fav;
+  try {
+    const res = await fetch('/api/favorites/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: [p], fav: want }) });
+    if (!res.ok) throw new Error();
+    x.fav = want ? 1 : 0;
+    if (view === 'favoritos' && !want) { SERVER_FILES = SERVER_FILES.filter(y => y !== x); sel.delete(p); }
+    toast(want ? 'Añadido a Favoritos' : 'Quitado de Favoritos');
+    render();
+  } catch (e) { toast('No se pudo actualizar Favoritos'); }
+}
+
+function run(a) {
+  const paths = Array.from(sel), n = paths.length;
   if (a === 'subir') return $('up').click();
-  
+  if (a === 'mover') return toast('Mover se conectará más adelante.');
   if (a === 'crear') {
     const nm = prompt('Nombre de la nueva carpeta:');
-    if (!nm || !nm.trim()) return;
-    try {
-      const res = await fetch('/api/files/mkdir', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: cwd, name: nm.trim() })
-      });
-      if (res.ok) { toast('Carpeta creada'); loadFiles(); }
-      else toast('Error al crear la carpeta');
-    } catch (e) { toast('Error de conexión'); }
-  } 
-  else if (a === 'eliminar') {
-    if (!confirm(`¿Eliminar ${sel.size} elemento(s)?`)) return;
-    try {
-      const res = await fetch('/api/files/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paths: Array.from(sel) })
-      });
-      if (res.ok) { toast('Eliminado con éxito'); sel.clear(); loadFiles(); }
-      else toast('Error al eliminar');
-    } catch (e) { toast('Error de conexión'); }
+    if (nm && nm.trim()) act('/api/files/mkdir', { path: cwd, name: nm.trim() }, 'Carpeta creada');
   }
-  else if (a === 'copiar') {
-    try {
-      const res = await fetch('/api/files/copy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paths: Array.from(sel) })
-      });
-      if (res.ok) { toast('Copia creada'); sel.clear(); loadFiles(); }
-      else toast('Error al copiar');
-    } catch (e) { toast('Error de conexión'); }
-  }
+  else if (a === 'eliminar') act('/api/files/delete', { paths }, 'Movido a la papelera');
+  else if (a === 'copiar') act('/api/files/copy', { paths }, 'Copia creada');
+  else if (a === 'quitar') act('/api/favorites/toggle', { paths, fav: false }, 'Quitado de Favoritos');
+  else if (a === 'restaurar') act('/api/trash/restore', { ids: paths }, 'Restaurado');
+  else if (a === 'borrar') { if (confirm(`¿Eliminar definitivamente ${n} elemento(s)? No se puede deshacer.`)) act('/api/trash/delete', { ids: paths }, 'Eliminado definitivamente'); }
+  else if (a === 'vaciar') { if (SERVER_FILES.length && confirm('¿Vaciar la papelera? No se puede deshacer.')) act('/api/trash/delete', { all: true }, 'Papelera vaciada'); }
 }
 
 async function uploadFiles(filesList) {
@@ -255,13 +280,14 @@ async function uploadFiles(filesList) {
 
 /* ---------- Delegación de Eventos ---------- */
 document.addEventListener('click', e => {
-  const b = e.target.closest('[data-v],[data-go],[data-act],[data-pf]');
+  const b = e.target.closest('[data-v],[data-go],[data-act],[data-pf],[data-fav]');
   if (!b) return;
   const d = b.dataset;
   if (d.v) setView(d.v);
-  else if (d.pf) { PF.tab = d.pf; drawPerf(); }
-  else if (d.go) { cwd = d.go; sel.clear(); loadFiles(); }
+  else if (d.pf) { PF.tab = d.pf; $('view').innerHTML = perf(); drawPerf(); $('view').querySelector('[aria-selected=true]').focus(); }
+  else if (d.go) { view = 'inicio'; cwd = d.go; q = ''; $('q').value = ''; sel.clear(); SERVER_FILES = []; loadFiles(); render(); }
   else if (d.act) run(d.act);
+  else if (d.fav) toggleFav(d.fav);
 });
 
 document.addEventListener('change', e => {
@@ -272,7 +298,7 @@ document.addEventListener('change', e => {
     t.closest('.row').classList.toggle('on', t.checked);
     sync();
   } else if (t.id === 'all') {
-    SERVER_FILES.forEach(x => t.checked ? sel.add(x.p) : sel.delete(x.p));
+    items().forEach(x => t.checked ? sel.add(x.p) : sel.delete(x.p));
     document.querySelectorAll('[data-sel]').forEach(c => { c.checked = t.checked; c.closest('.row').classList.toggle('on', t.checked); });
     sync();
   } else if (t.id === 'up' && t.files.length) {
@@ -281,12 +307,18 @@ document.addEventListener('change', e => {
   }
 });
 
-$('q').addEventListener('input', e => { q = e.target.value; render(); });
+$('q').addEventListener('input', e => { q = e.target.value; sel.clear(); $('view').innerHTML = body(); sync(); });
+$('tog').addEventListener('click', () => {
+  if (innerWidth < 768) { $('side').classList.toggle('open'); $('scrim').classList.toggle('hidden'); }
+  else $('side').classList.toggle('collapsed');
+});
+$('scrim').addEventListener('click', () => { $('side').classList.remove('open'); $('scrim').classList.add('hidden'); });
 
 /* ---------- Inicialización ---------- */
-$('rail').innerHTML = RAIL.map(([v, l, i]) => `<button class="tile" data-v="${v}" title="${l}">${ic(I[i], 'w-7 h-7')}</button>`).join('');
+$('rail').innerHTML = RAIL.map(([v, l, i]) => `<button class="tile" data-v="${v}" title="${l}" aria-label="${l}">${ic(I[i], 'w-7 h-7')}</button>`).join('');
 $('menu').innerHTML = MENU.map(([v, l]) => `<button class="mi" data-v="${v}">${l}</button>`).join('');
 $('tog').innerHTML = ic(I.panel, 'w-6 h-6');
 
 // Carga inicial
 loadFiles();
+render();

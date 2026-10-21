@@ -5,14 +5,40 @@ import socket
 import time
 import os
 import shutil
+import json
+import uuid
+import threading
 from pathlib import Path
 
 app = Flask(__name__)
 
 # Directorio raíz base que explorará el NAS dentro del contenedor
 # (Te recomiendo montar una carpeta del host aquí con Docker)
-STORAGE_ROOT = os.path.abspath('/app/storage')
+STORAGE_ROOT = os.path.abspath(os.environ.get('STORAGE_ROOT', '/app/storage'))
 os.makedirs(STORAGE_ROOT, exist_ok=True)
+
+# Papelera y favoritos viven dentro del almacenamiento (carpeta oculta .nas),
+# así persisten junto con el volumen y la papelera se mueve sin copiar datos.
+META_NAME = '.nas'
+META = os.path.join(STORAGE_ROOT, META_NAME)
+TRASH_DIR = os.path.join(META, 'trash')
+TRASH_DB = os.path.join(META, 'trash.json')
+FAV_DB = os.path.join(META, 'favorites.json')
+os.makedirs(TRASH_DIR, exist_ok=True)
+db_lock = threading.Lock()
+
+def db_load(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def db_save(path, data):
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
 
 # Variables globales para métricas en tiempo real
 last_disk_io = None
@@ -120,41 +146,100 @@ def performance_details():
 # --- APIS DE EXPLORADOR DE ARCHIVOS (CRUD) ---
 
 def safe_path(subpath):
-    # Evita ataques de salto de directorio (Path Traversal)
-    if not subpath:
-        subpath = ""
-    target = os.path.normpath(os.path.join(STORAGE_ROOT, subpath.lstrip('/')))
-    if not target.startswith(STORAGE_ROOT):
+    # Evita saltos de directorio y el acceso a la carpeta interna .nas
+    target = os.path.normpath(os.path.join(STORAGE_ROOT, (subpath or '').lstrip('/')))
+    inside = target == STORAGE_ROOT or target.startswith(STORAGE_ROOT + os.sep)
+    if not inside or target == META or target.startswith(META + os.sep):
         return STORAGE_ROOT
     return target
 
+def rel_of(abs_p):
+    rel = os.path.relpath(abs_p, STORAGE_ROOT).replace('\\', '/')
+    return '/' if rel == '.' else '/' + rel
+
+def make_item(abs_p, favs):
+    st = os.stat(abs_p)
+    rel, name, is_dir = rel_of(abs_p), os.path.basename(abs_p), os.path.isdir(abs_p)
+    return {
+        'n': name,
+        't': 'dir' if is_dir else get_file_type(name),
+        's': 0 if is_dir else st.st_size,
+        'p': rel,
+        'd': time.strftime('%Y-%m-%d', time.localtime(st.st_mtime)),
+        'm': st.st_mtime,
+        'fav': 1 if rel in favs else 0
+    }
+
+def walk_items(favs):
+    for root, dirs, files in os.walk(STORAGE_ROOT):
+        dirs[:] = [d for d in dirs if not (root == STORAGE_ROOT and d == META_NAME)]
+        for n in dirs + files:
+            try:
+                yield make_item(os.path.join(root, n), favs)
+            except OSError:
+                continue
+
 @app.route('/api/files/list', methods=['GET'])
 def list_files():
-    req_path = request.args.get('path', '')
-    abs_path = safe_path(req_path)
-    
+    abs_path = safe_path(request.args.get('path', ''))
     if not os.path.exists(abs_path):
         return jsonify({'error': 'Ruta no encontrada'}), 404
-
+    favs = set(db_load(FAV_DB))
     items = []
     try:
-        for idx, entry in enumerate(os.scandir(abs_path)):
-            stat = entry.stat()
-            is_dir = entry.is_dir()
-            rel_p = os.path.relpath(entry.path, STORAGE_ROOT).replace('\\', '/')
-            items.append({
-                'id': idx + 1,
-                'n': entry.name,
-                't': 'dir' if is_dir else get_file_type(entry.name),
-                's': 0 if is_dir else stat.st_size,
-                'p': '/' + rel_p if rel_p != '.' else '/',
-                'd': time.strftime('%Y-%m-%d', time.localtime(stat.st_mtime)),
-                'fav': 0
-            })
+        for entry in os.scandir(abs_path):
+            if abs_path == STORAGE_ROOT and entry.name == META_NAME:
+                continue
+            try:
+                items.append(make_item(entry.path, favs))
+            except OSError:
+                continue
     except PermissionError:
         return jsonify({'error': 'Permiso denegado'}), 403
+    items.sort(key=lambda x: (x['t'] != 'dir', x['n'].lower()))
+    return jsonify({'current_path': rel_of(abs_path), 'items': items})
 
-    return jsonify({'current_path': '/' + os.path.relpath(abs_path, STORAGE_ROOT).replace('\\', '/'), 'items': items})
+@app.route('/api/files/all', methods=['GET'])
+def all_files():
+    # Todos los archivos/carpetas; con ?type=img|vid solo archivos de ese tipo
+    ftype = request.args.get('type')
+    items = [i for i in walk_items(set(db_load(FAV_DB))) if not ftype or i['t'] == ftype]
+    items.sort(key=lambda x: x['p'].lower())
+    return jsonify({'items': items[:2000]})
+
+@app.route('/api/files/recent', methods=['GET'])
+def recent_files():
+    # Archivos agregados o modificados más recientemente
+    items = [i for i in walk_items(set(db_load(FAV_DB))) if i['t'] != 'dir']
+    items.sort(key=lambda x: x['m'], reverse=True)
+    return jsonify({'items': items[:50]})
+
+@app.route('/api/favorites', methods=['GET'])
+def list_favorites():
+    favs = db_load(FAV_DB)
+    items = []
+    for p in favs:
+        abs_p = safe_path(p)
+        if abs_p != STORAGE_ROOT and os.path.exists(abs_p):
+            items.append(make_item(abs_p, set(favs)))
+    return jsonify({'items': items})
+
+@app.route('/api/favorites/toggle', methods=['POST'])
+def toggle_favorites():
+    data = request.json or {}
+    want = bool(data.get('fav'))
+    with db_lock:
+        favs = db_load(FAV_DB)
+        for p in data.get('paths', []):
+            abs_p = safe_path(p)
+            if abs_p == STORAGE_ROOT or not os.path.exists(abs_p):
+                continue
+            rel = rel_of(abs_p)
+            favs = [f for f in favs if f != rel]
+            if want:
+                favs.append(rel)
+        db_save(FAV_DB, favs)
+    return jsonify({'success': True})
 
 @app.route('/api/files/mkdir', methods=['POST'])
 def make_directory():
@@ -164,6 +249,9 @@ def make_directory():
     if not dir_name:
         return jsonify({'error': 'Nombre inválido'}), 400
     
+    dir_name = os.path.basename(dir_name.strip())
+    if dir_name in ('', '.', '..'):
+        return jsonify({'error': 'Nombre inválido'}), 400
     abs_path = os.path.join(safe_path(req_path), dir_name)
     try:
         os.makedirs(abs_path, exist_ok=True)
@@ -181,20 +269,79 @@ def upload_files():
     uploaded_files = request.files.getlist('files')
     for file in uploaded_files:
         if file.filename:
-            file.save(os.path.join(abs_path, file.filename))
+            file.save(os.path.join(abs_path, os.path.basename(file.filename)))
     return jsonify({'success': True})
 
 @app.route('/api/files/delete', methods=['POST'])
 def delete_files():
-    data = request.json
-    paths = data.get('paths', []) # lista de rutas relativas
-    for p in paths:
-        abs_p = safe_path(p)
-        if os.path.exists(abs_p):
-            if os.path.isdir(abs_p):
-                shutil.rmtree(abs_p)
+    # "Eliminar" mueve a la papelera; el borrado definitivo se hace desde /api/trash/delete
+    paths = (request.json or {}).get('paths', [])
+    with db_lock:
+        trash, favs = db_load(TRASH_DB), db_load(FAV_DB)
+        for p in paths:
+            abs_p = safe_path(p)
+            if abs_p == STORAGE_ROOT or not os.path.exists(abs_p):
+                continue
+            rel, name, is_dir = rel_of(abs_p), os.path.basename(abs_p), os.path.isdir(abs_p)
+            size = 0 if is_dir else os.path.getsize(abs_p)
+            tid = uuid.uuid4().hex
+            os.makedirs(os.path.join(TRASH_DIR, tid))
+            shutil.move(abs_p, os.path.join(TRASH_DIR, tid, name))
+            trash.append({'id': tid, 'n': name, 't': 'dir' if is_dir else get_file_type(name),
+                          's': size, 'o': rel, 'd': time.strftime('%Y-%m-%d'), 'm': time.time()})
+            favs = [f for f in favs if f != rel and not f.startswith(rel + '/')]
+        db_save(TRASH_DB, trash)
+        db_save(FAV_DB, favs)
+    return jsonify({'success': True})
+
+@app.route('/api/trash/list', methods=['GET'])
+def trash_list():
+    items = sorted(db_load(TRASH_DB), key=lambda x: x['m'], reverse=True)
+    return jsonify({'items': [{**i, 'p': i['id'], 'fav': 0} for i in items]})
+
+@app.route('/api/trash/restore', methods=['POST'])
+def trash_restore():
+    ids = set((request.json or {}).get('ids', []))
+    with db_lock:
+        keep = []
+        for it in db_load(TRASH_DB):
+            if it['id'] not in ids:
+                keep.append(it)
+                continue
+            src = os.path.join(TRASH_DIR, it['id'], it['n'])
+            if not os.path.exists(src):
+                continue  # ya no existe en disco: se descarta de la lista
+            dest = safe_path(it['o'])
+            if dest == STORAGE_ROOT:
+                dest = os.path.join(STORAGE_ROOT, it['n'])
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if os.path.exists(dest):  # si ya hay algo con ese nombre, no se sobrescribe
+                base, ext = os.path.splitext(dest)
+                n = 1
+                while os.path.exists(f"{base} (restaurado {n}){ext}"):
+                    n += 1
+                dest = f"{base} (restaurado {n}){ext}"
+            try:
+                shutil.move(src, dest)
+                shutil.rmtree(os.path.join(TRASH_DIR, it['id']), ignore_errors=True)
+            except OSError:
+                keep.append(it)
+        db_save(TRASH_DB, keep)
+    return jsonify({'success': True})
+
+@app.route('/api/trash/delete', methods=['POST'])
+def trash_delete():
+    # Borrado definitivo: {"ids": [...]} o {"all": true} para vaciar la papelera
+    data = request.json or {}
+    ids = set(data.get('ids', []))
+    with db_lock:
+        keep = []
+        for it in db_load(TRASH_DB):
+            if data.get('all') or it['id'] in ids:
+                shutil.rmtree(os.path.join(TRASH_DIR, it['id']), ignore_errors=True)
             else:
-                os.remove(abs_p)
+                keep.append(it)
+        db_save(TRASH_DB, keep)
     return jsonify({'success': True})
 
 @app.route('/api/files/copy', methods=['POST'])
@@ -203,13 +350,13 @@ def copy_files():
     paths = data.get('paths', [])
     for p in paths:
         abs_p = safe_path(p)
-        if os.path.exists(abs_p):
+        if abs_p != STORAGE_ROOT and os.path.exists(abs_p):
             base, ext = os.path.splitext(abs_p)
             new_p = f"{base} (copia){ext}"
             if os.path.isdir(abs_p):
-                shutil.copytree(abs_p, new_p)
+                shutil.copytree(abs_p, new_p, copy_function=shutil.copy)
             else:
-                shutil.copy2(abs_p, new_p)
+                shutil.copy(abs_p, new_p)
     return jsonify({'success': True})
 
 if __name__ == '__main__':
