@@ -13,14 +13,22 @@ const I = {
   move: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   trash: '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>',
   undo: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>',
-  panel: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/>'
+  panel: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/>',
+  paste: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>',
+  drive: '<rect x="2" y="13" width="20" height="8" rx="2"/><path d="M5 13l2.5-9h9L19 13M6 17h.01M10 17h.01"/>',
+  back: '<path d="M19 12H5M12 19l-7-7 7-7"/>',
+  fwd: '<path d="M5 12h14M12 5l7 7-7 7"/>'
 };
 
 /* ---------- Estado y variables globales ---------- */
 let view = 'inicio', cwd = '/', q = '';
+let drv = null, drvName = '', homeCwd = '/', CLIP = null, HIST = [], hpos = -1;
 let SERVER_FILES = [];
 let loading = false, loadTok = 0;
-const isFiles = v => !VIEWS[v].k || VIEWS[v].k === 'trash';
+const isDrv = () => view === 'unidades' && !!drv;                 // dentro de una unidad
+const curDrive = () => (view === 'unidades' && drv) || 'sistema';
+const isFiles = () => view === 'unidades' ? isDrv() : (!VIEWS[view].k || VIEWS[view].k === 'trash');
+const curActs = () => isDrv() ? ['crear', 'copiar', 'subir', 'mover', 'pegar', 'eliminar'] : (VIEWS[view].a || []);
 const sel = new Set();
 const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fd = d => d.split('-').reverse().join('/');
@@ -40,7 +48,7 @@ function toast(m) {
 const RAIL = [['inicio', 'Inicio', 'home'], ['favoritos', 'Favoritos', 'star'], ['imagenes', 'Imágenes', 'img'], ['videos', 'Videos', 'vid']];
 const MENU = [['recientes', 'Recientes'], ['todos', 'Todos los archivos/carpetas'], ['rendimiento', 'Rendimiento'], ['papelera', 'Papelera'], ['unidades', 'Unidades de almacenamiento']];
 const VIEWS = {
-  inicio: { t: 'Inicio', a: ['crear', 'copiar', 'subir', 'mover', 'eliminar'] },
+  inicio: { t: 'Inicio', a: ['crear', 'copiar', 'subir', 'mover', 'pegar', 'eliminar'] },
   favoritos: { t: 'Favoritos', a: ['quitar'] },
   imagenes: { t: 'Imágenes', a: ['copiar', 'eliminar'] },
   videos: { t: 'Videos', a: ['copiar', 'eliminar'] },
@@ -52,7 +60,7 @@ const VIEWS = {
 };
 const ACT = {
   crear: ['Crear', I.plus, 0], copiar: ['Copiar', I.copy, 1], subir: ['Subir', I.up, 0], mover: ['Mover', I.move, 1],
-  eliminar: ['Eliminar', I.trash, 1], agregar: ['Agregar', I.plus, 0], quitar: ['Eliminar de Favoritos', I.trash, 1],
+  eliminar: ['Eliminar', I.trash, 1], agregar: ['Agregar', I.plus, 0], pegar: ['Pegar', I.paste, 2], quitar: ['Eliminar de Favoritos', I.trash, 1],
   restaurar: ['Restaurar', I.undo, 1], borrar: ['Eliminar definitivamente', I.trash, 1], vaciar: ['Vaciar papelera', I.trash, 0]
 };
 
@@ -65,7 +73,8 @@ const SRC = {
 async function loadFiles() {
   const tok = ++loadTok;
   loading = true;
-  const url = SRC[view] || `/api/files/list?path=${encodeURIComponent(cwd)}`;
+  const lst = `/api/files/list?path=${encodeURIComponent(cwd)}` + (isDrv() ? `&drive=${drv}` : '');
+  const url = view === 'unidades' ? (drv ? lst : '/api/drives') : (SRC[view] || lst);
   let failed = false;
   try {
     const res = await fetch(url, { cache: 'no-store' });
@@ -95,9 +104,9 @@ function rowHtml(x) {
   const name = x.t === 'dir' && !trash
     ? `<button class="truncate text-left hover:underline font-medium" data-go="${esc(x.p)}">${esc(x.n)}</button>`
     : `<span class="truncate">${esc(x.n)}</span>`;
-  const star = trash ? '' : `<button data-fav="${esc(x.p)}" aria-pressed="${!!x.fav}" class="shrink-0 ${x.fav ? 'text-yellow-300' : 'text-white/30 hover:text-white'}" aria-label="${x.fav ? 'Quitar de favoritos' : 'Marcar como favorito'}: ${esc(x.n)}">${ic(I.star, 'w-4 h-4' + (x.fav ? ' fill-current' : ''))}</button>`;
-  const loc = trash ? x.o : (x.p.slice(0, x.p.lastIndexOf('/')) || '/');
-  const where = view === 'inicio' ? '' : `<span class="hidden lg:inline truncate text-xs text-white/40">${trash ? 'de' : 'en'} ${esc(loc)}</span>`;
+  const star = trash || isDrv() ? '' : `<button data-fav="${esc(x.p)}" aria-pressed="${!!x.fav}" class="shrink-0 ${x.fav ? 'text-yellow-300' : 'text-white/30 hover:text-white'}" aria-label="${x.fav ? 'Quitar de favoritos' : 'Marcar como favorito'}: ${esc(x.n)}">${ic(I.star, 'w-4 h-4' + (x.fav ? ' fill-current' : ''))}</button>`;
+  const loc = trash ? (x.dr && x.dr !== 'sistema' ? `${x.dn}: ${x.o}` : x.o) : (x.p.slice(0, x.p.lastIndexOf('/')) || '/');
+  const where = view === 'inicio' || isDrv() ? '' : `<span class="hidden lg:inline truncate text-xs text-white/40">${trash ? 'de' : 'en'} ${esc(loc)}</span>`;
   return `<div class="row hover:bg-white/5 ${sel.has(x.p) ? 'on' : ''}">
     <input type="checkbox" data-sel="${esc(x.p)}" ${sel.has(x.p) ? 'checked' : ''} aria-label="Seleccionar ${esc(x.n)}">
     <div class="flex items-center gap-2 min-w-0">${ic(I[x.t] || I.doc)}${name}${star}${where}</div>
@@ -109,6 +118,7 @@ function table(l) {
   const trash = view === 'papelera';
   if (!l.length) {
     const msgs = { papelera: 'La papelera está vacía.', favoritos: 'Aún no tienes favoritos. Marca la estrella junto a un archivo o carpeta.', inicio: 'Esta carpeta está vacía. Usa Crear o Subir para añadir contenido.' };
+    msgs.unidades = msgs.inicio;
     const m = loading ? 'Cargando…' : q ? `Ningún resultado para “${esc(q)}”.` : (msgs[view] || 'No hay elementos que mostrar aquí.');
     return `<p class="py-10 text-white/60">${m}</p>`;
   }
@@ -180,31 +190,39 @@ function perfStop() { if (PF.timer) { clearInterval(PF.timer); PF.timer = null; 
 
 const perf = () => `<div role="tablist" aria-label="Componentes del sistema" class="flex flex-wrap items-center text-sm mb-6">${PF_TABS.map(([k, l], n) => `${n ? '<span class="h-4 w-px bg-white/30"></span>' : ''}<button role="tab" data-pf="${k}" aria-selected="${PF.tab === k}" class="px-4 py-1.5 rounded-full ${PF.tab === k ? 'bg-[#1b2a5c] text-white' : 'text-white/60 hover:text-white'}">${l}</button>`).join('')}</div><div id="pf"></div>`;
 
+const drivesHtml = () => !SERVER_FILES.length
+  ? `<p class="py-10 text-white/60">${loading ? 'Buscando unidades…' : 'No se detectó ninguna unidad.'}</p>`
+  : SERVER_FILES.map(d => `<button data-drv="${esc(d.id)}" class="w-full text-left rounded-xl px-3 py-5 border-b border-white/10 hover:bg-white/5 flex items-center gap-4">${ic(I.drive, 'w-9 h-9 shrink-0')}<div class="flex-1 min-w-0"><div class="flex justify-between gap-4"><span class="font-semibold truncate">${esc(d.name)}</span><span class="text-white/70 text-sm shrink-0">${fmt(d.free)} libres de ${fmt(d.total)}</span></div><p class="text-xs text-white/50 mb-2 truncate">${d.kind === 'sistema' ? 'Almacenamiento del sistema' : 'Unidad externa'} · ${esc(d.fstype || 'sin formato')} · ${esc(d.device || d.mount)}</p>${bar(d.percent)}</div></button>`).join('')
+    + '<p class="text-xs text-white/40 mt-4">La lista se actualiza sola al conectar o quitar una unidad.</p>';
+
 function body() {
-  const k = VIEWS[view].k;
-  return k === 'perf' ? perf() : table(items());
+  if (view === 'unidades' && !drv) return drivesHtml();
+  return VIEWS[view].k === 'perf' ? perf() : table(items());
 }
 
 const crumbs = () => {
-  const rel = cwd.split('/').filter(Boolean);
   let p = '';
-  return `<button class="hover:underline" data-go="/">root</button>` + rel.map(s => { p += '/' + s; return ` / <button class="hover:underline" data-go="${esc(p)}">${esc(s)}</button>`; }).join('');
+  const segs = cwd.split('/').filter(Boolean).map(s => { p += '/' + s; return ` / <button class="hover:underline" data-go="${esc(p)}">${esc(s)}</button>`; }).join('');
+  return isDrv()
+    ? `<button class="hover:underline" data-v="unidades">Unidades</button> / <button class="hover:underline" data-go="/">${esc(drvName)}</button>${segs}`
+    : `<button class="hover:underline" data-go="/">root</button>${segs}`;
 };
 
 function sync() {
   const n = sel.size;
-  $('count').textContent = `Seleccionados: ${n} elemento${n === 1 ? '' : 's'}`;
+  $('count').textContent = `Seleccionados: ${n} elemento${n === 1 ? '' : 's'}` + (CLIP ? ` · Portapapeles: ${CLIP.paths.length} para ${CLIP.mode === 'move' ? 'mover' : 'copiar'}` : '');
   document.querySelectorAll('[data-need]').forEach(b => b.disabled = !n);
+  document.querySelectorAll('[data-clip]').forEach(b => b.disabled = !CLIP);
   const all = $('all'), l = items();
   if (all) all.checked = l.length > 0 && l.every(x => sel.has(x.p));
 }
 
 function render() {
-  const v = VIEWS[view], files = isFiles(view);
-  $('title').textContent = v.t;
-  document.title = v.t + ' - NAS Dashboard';
-  $('path').innerHTML = view === 'inicio' ? crumbs() : '';
-  $('acts').innerHTML = (v.a || []).map(a => { const [l, i, n] = ACT[a]; return `<button class="pill" data-act="${a}" ${n ? 'data-need disabled' : ''}>${ic(i, 'w-4 h-4')}${l}</button>`; }).join('');
+  const files = isFiles();
+  $('title').textContent = isDrv() ? drvName : VIEWS[view].t;
+  document.title = $('title').textContent + ' - NAS Dashboard';
+  $('path').innerHTML = view === 'inicio' || isDrv() ? crumbs() : '';
+  $('acts').innerHTML = curActs().map(a => { const [l, i, n] = ACT[a]; return `<button class="pill" data-act="${a}" ${n === 1 ? 'data-need disabled' : n === 2 ? 'data-clip disabled' : ''}>${ic(i, 'w-4 h-4')}${l}</button>`; }).join('');
   $('q').classList.toggle('hidden', !files);
   $('count').classList.toggle('hidden', !files);
   $('view').innerHTML = body();
@@ -214,23 +232,34 @@ function render() {
     b.classList.toggle('on', on);
     on ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current');
   });
+  $('back').disabled = hpos <= 0;
+  $('fwd').disabled = hpos >= HIST.length - 1;
   sync();
 }
 
-function setView(v) {
-  view = v; sel.clear(); q = ''; $('q').value = '';
+/* Navegación con historial (atrás / adelante) */
+const here = () => ({ view, cwd, drv, dn: drvName });
+function navTo(s, push = true) {
+  if (push && JSON.stringify(s) !== JSON.stringify(HIST[hpos])) { HIST = HIST.slice(0, hpos + 1); HIST.push(s); hpos++; }
+  view = s.view; cwd = s.cwd; drv = s.drv; drvName = s.dn || '';
+  if (view === 'inicio') homeCwd = cwd;
+  sel.clear(); q = ''; $('q').value = '';
   $('side').classList.remove('open'); $('scrim').classList.add('hidden');
   SERVER_FILES = []; loadTok++; loading = false;
-  if (isFiles(v)) loadFiles();
+  if (isFiles() || view === 'unidades') loadFiles();
   render();
 }
+const setView = v => navTo({ view: v, cwd: v === 'inicio' ? homeCwd : '/', drv: null, dn: '' });
 
 /* ---------- Acciones Reales contra la API de Flask ---------- */
-async function act(url, body, ok) {
+async function act(url, body, ok, done) {
   try {
     const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!res.ok) throw new Error();
-    sel.clear(); toast(ok); loadFiles();
+    const r = await res.json().catch(() => ({}));
+    sel.clear();
+    done ? done(r) : toast(ok);
+    loadFiles();
   } catch (e) { toast('No se pudo completar la acción'); }
 }
 
@@ -249,15 +278,26 @@ async function toggleFav(p) {
 }
 
 function run(a) {
-  const paths = Array.from(sel), n = paths.length;
+  const paths = Array.from(sel), n = paths.length, dr = curDrive();
   if (a === 'subir') return $('up').click();
-  if (a === 'mover') return toast('Mover se conectará más adelante.');
+  if (a === 'copiar' || a === 'mover') {
+    CLIP = { mode: a === 'mover' ? 'move' : 'copy', drive: dr, paths };
+    sel.clear(); render();
+    return toast(`Portapapeles: ${n} elemento${n > 1 ? 's' : ''} para ${a === 'mover' ? 'mover' : 'copiar'}. Abre la carpeta destino y pulsa Pegar.`);
+  }
+  if (a === 'pegar') {
+    if (!CLIP) return;
+    const c = CLIP;
+    return act('/api/files/paste', { mode: c.mode, src_drive: c.drive, paths: c.paths, dest_drive: dr, dest_path: cwd }, '', r => {
+      if (c.mode === 'move' && r.done && !r.errors) CLIP = null;
+      toast(r.errors ? `Pegado con ${r.errors} error(es)` : r.done ? 'Pegado' : 'No se pegó nada (¿es la misma carpeta?)');
+    });
+  }
   if (a === 'crear') {
     const nm = prompt('Nombre de la nueva carpeta:');
-    if (nm && nm.trim()) act('/api/files/mkdir', { path: cwd, name: nm.trim() }, 'Carpeta creada');
+    if (nm && nm.trim()) act('/api/files/mkdir', { path: cwd, name: nm.trim(), drive: dr }, 'Carpeta creada');
   }
-  else if (a === 'eliminar') act('/api/files/delete', { paths }, 'Movido a la papelera');
-  else if (a === 'copiar') act('/api/files/copy', { paths }, 'Copia creada');
+  else if (a === 'eliminar') act('/api/files/delete', { paths, drive: dr }, 'Movido a la papelera');
   else if (a === 'quitar') act('/api/favorites/toggle', { paths, fav: false }, 'Quitado de Favoritos');
   else if (a === 'restaurar') act('/api/trash/restore', { ids: paths }, 'Restaurado');
   else if (a === 'borrar') { if (confirm(`¿Eliminar definitivamente ${n} elemento(s)? No se puede deshacer.`)) act('/api/trash/delete', { ids: paths }, 'Eliminado definitivamente'); }
@@ -267,6 +307,7 @@ function run(a) {
 async function uploadFiles(filesList) {
   const formData = new FormData();
   formData.append('path', cwd);
+  formData.append('drive', curDrive());
   for (let i = 0; i < filesList.length; i++) {
     formData.append('files', filesList[i]);
   }
@@ -280,12 +321,13 @@ async function uploadFiles(filesList) {
 
 /* ---------- Delegación de Eventos ---------- */
 document.addEventListener('click', e => {
-  const b = e.target.closest('[data-v],[data-go],[data-act],[data-pf],[data-fav]');
+  const b = e.target.closest('[data-v],[data-go],[data-act],[data-pf],[data-fav],[data-drv]');
   if (!b) return;
   const d = b.dataset;
   if (d.v) setView(d.v);
   else if (d.pf) { PF.tab = d.pf; $('view').innerHTML = perf(); drawPerf(); $('view').querySelector('[aria-selected=true]').focus(); }
-  else if (d.go) { view = 'inicio'; cwd = d.go; q = ''; $('q').value = ''; sel.clear(); SERVER_FILES = []; loadFiles(); render(); }
+  else if (d.go) navTo({ view: isDrv() ? 'unidades' : 'inicio', cwd: d.go, drv: isDrv() ? drv : null, dn: isDrv() ? drvName : '' });
+  else if (d.drv) { const x = SERVER_FILES.find(y => y.id === d.drv); if (x) navTo({ view: 'unidades', cwd: '/', drv: x.id, dn: x.name }); }
   else if (d.act) run(d.act);
   else if (d.fav) toggleFav(d.fav);
 });
@@ -318,7 +360,20 @@ $('scrim').addEventListener('click', () => { $('side').classList.remove('open');
 $('rail').innerHTML = RAIL.map(([v, l, i]) => `<button class="tile" data-v="${v}" title="${l}" aria-label="${l}">${ic(I[i], 'w-7 h-7')}</button>`).join('');
 $('menu').innerHTML = MENU.map(([v, l]) => `<button class="mi" data-v="${v}">${l}</button>`).join('');
 $('tog').innerHTML = ic(I.panel, 'w-6 h-6');
+$('back').innerHTML = ic(I.back, 'w-6 h-6');
+$('fwd').innerHTML = ic(I.fwd, 'w-6 h-6');
+$('back').addEventListener('click', () => { if (hpos > 0) navTo(HIST[--hpos], false); });
+$('fwd').addEventListener('click', () => { if (hpos < HIST.length - 1) navTo(HIST[++hpos], false); });
+
+// Detecta unidades nuevas (USB, discos externos) mientras se ve la lista
+setInterval(async () => {
+  if (view !== 'unidades' || drv) return;
+  try {
+    const r = await fetch('/api/drives', { cache: 'no-store' });
+    const items = (await r.json()).items || [];
+    if (view === 'unidades' && !drv && JSON.stringify(items) !== JSON.stringify(SERVER_FILES)) { SERVER_FILES = items; render(); }
+  } catch (e) { /* se reintenta en el siguiente ciclo */ }
+}, 5000);
 
 // Carga inicial
-loadFiles();
-render();
+navTo(here());

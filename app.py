@@ -7,6 +7,7 @@ import os
 import shutil
 import json
 import uuid
+import hashlib
 import threading
 from pathlib import Path
 
@@ -145,21 +146,65 @@ def performance_details():
 
 # --- APIS DE EXPLORADOR DE ARCHIVOS (CRUD) ---
 
-def safe_path(subpath):
-    # Evita saltos de directorio y el acceso a la carpeta interna .nas
-    target = os.path.normpath(os.path.join(STORAGE_ROOT, (subpath or '').lstrip('/')))
-    inside = target == STORAGE_ROOT or target.startswith(STORAGE_ROOT + os.sep)
-    if not inside or target == META or target.startswith(META + os.sep):
+# --- UNIDADES DE ALMACENAMIENTO ---
+# Dentro de Docker solo se ven las unidades montadas en el contenedor:
+# monta /media y /mnt del host con -v /media:/media:rslave -v /mnt:/mnt:rslave
+DRIVE_DIRS = [d for d in os.environ.get('DRIVE_DIRS', '/media:/mnt:/run/media').split(':') if d]
+
+def _under(path, base):
+    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+def detect_drives():
+    parts = psutil.disk_partitions(all=False)
+    main = max((p for p in parts if _under(STORAGE_ROOT, os.path.normpath(p.mountpoint))),
+               key=lambda p: len(p.mountpoint), default=None)
+    drives = [{'id': 'sistema', 'name': 'Almacenamiento principal', 'kind': 'sistema', 'root': STORAGE_ROOT,
+               'device': main.device if main else '', 'fstype': main.fstype if main else ''}]
+    for p in parts:
+        mp = os.path.normpath(p.mountpoint)
+        if _under(STORAGE_ROOT, mp) or mp in DRIVE_DIRS or not any(_under(mp, b) for b in DRIVE_DIRS):
+            continue
+        drives.append({'id': hashlib.sha1(mp.encode()).hexdigest()[:8], 'name': os.path.basename(mp) or mp,
+                       'kind': 'externa', 'root': mp, 'device': p.device, 'fstype': p.fstype})
+    return drives
+
+def drive_root(drive_id):
+    if not drive_id or drive_id == 'sistema':
         return STORAGE_ROOT
+    return next((d['root'] for d in detect_drives() if d['id'] == drive_id), None)
+
+NO_DRIVE = ({'error': 'Unidad no disponible'}, 404)
+
+@app.route('/api/drives', methods=['GET'])
+def drives_list():
+    out = []
+    for d in detect_drives():
+        try:
+            u = psutil.disk_usage(d['root'])
+        except OSError:
+            continue
+        out.append({'id': d['id'], 'name': d['name'], 'kind': d['kind'], 'device': d['device'], 'fstype': d['fstype'],
+                    'mount': '' if d['kind'] == 'sistema' else d['root'],
+                    'total': u.total, 'used': u.used, 'free': u.free, 'percent': u.percent})
+    return jsonify({'items': out})
+
+def safe_path(subpath, root=None):
+    # Evita saltos de directorio y el acceso a la carpeta interna .nas
+    root = root or STORAGE_ROOT
+    target = os.path.normpath(os.path.join(root, (subpath or '').lstrip('/')))
+    if not _under(target, root):
+        return root
+    if root == STORAGE_ROOT and _under(target, META):
+        return root
     return target
 
-def rel_of(abs_p):
-    rel = os.path.relpath(abs_p, STORAGE_ROOT).replace('\\', '/')
+def rel_of(abs_p, root=None):
+    rel = os.path.relpath(abs_p, root or STORAGE_ROOT).replace('\\', '/')
     return '/' if rel == '.' else '/' + rel
 
-def make_item(abs_p, favs):
+def make_item(abs_p, favs, root=None):
     st = os.stat(abs_p)
-    rel, name, is_dir = rel_of(abs_p), os.path.basename(abs_p), os.path.isdir(abs_p)
+    rel, name, is_dir = rel_of(abs_p, root), os.path.basename(abs_p), os.path.isdir(abs_p)
     return {
         'n': name,
         't': 'dir' if is_dir else get_file_type(name),
@@ -181,23 +226,26 @@ def walk_items(favs):
 
 @app.route('/api/files/list', methods=['GET'])
 def list_files():
-    abs_path = safe_path(request.args.get('path', ''))
+    root = drive_root(request.args.get('drive'))
+    if not root:
+        return jsonify(NO_DRIVE[0]), NO_DRIVE[1]
+    abs_path = safe_path(request.args.get('path', ''), root)
     if not os.path.exists(abs_path):
         return jsonify({'error': 'Ruta no encontrada'}), 404
-    favs = set(db_load(FAV_DB))
+    favs = set(db_load(FAV_DB)) if root == STORAGE_ROOT else set()
     items = []
     try:
         for entry in os.scandir(abs_path):
-            if abs_path == STORAGE_ROOT and entry.name == META_NAME:
+            if root == STORAGE_ROOT and abs_path == root and entry.name == META_NAME:
                 continue
             try:
-                items.append(make_item(entry.path, favs))
+                items.append(make_item(entry.path, favs, root))
             except OSError:
                 continue
     except PermissionError:
         return jsonify({'error': 'Permiso denegado'}), 403
     items.sort(key=lambda x: (x['t'] != 'dir', x['n'].lower()))
-    return jsonify({'current_path': rel_of(abs_path), 'items': items})
+    return jsonify({'current_path': rel_of(abs_path, root), 'items': items})
 
 @app.route('/api/files/all', methods=['GET'])
 def all_files():
@@ -243,53 +291,63 @@ def toggle_favorites():
 
 @app.route('/api/files/mkdir', methods=['POST'])
 def make_directory():
-    data = request.json
-    req_path = data.get('path', '')
-    dir_name = data.get('name', '')
-    if not dir_name:
-        return jsonify({'error': 'Nombre inválido'}), 400
-    
-    dir_name = os.path.basename(dir_name.strip())
+    data = request.json or {}
+    root = drive_root(data.get('drive'))
+    if not root:
+        return jsonify(NO_DRIVE[0]), NO_DRIVE[1]
+    dir_name = os.path.basename(data.get('name', '').strip())
     if dir_name in ('', '.', '..'):
         return jsonify({'error': 'Nombre inválido'}), 400
-    abs_path = os.path.join(safe_path(req_path), dir_name)
     try:
-        os.makedirs(abs_path, exist_ok=True)
+        os.makedirs(os.path.join(safe_path(data.get('path', ''), root), dir_name), exist_ok=True)
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/files/upload', methods=['POST'])
 def upload_files():
-    req_path = request.form.get('path', '')
-    abs_path = safe_path(req_path)
+    root = drive_root(request.form.get('drive'))
+    if not root:
+        return jsonify(NO_DRIVE[0]), NO_DRIVE[1]
+    abs_path = safe_path(request.form.get('path', ''), root)
     if 'files' not in request.files:
         return jsonify({'error': 'No se enviaron archivos'}), 400
-    
-    uploaded_files = request.files.getlist('files')
-    for file in uploaded_files:
-        if file.filename:
-            file.save(os.path.join(abs_path, os.path.basename(file.filename)))
+    try:
+        for file in request.files.getlist('files'):
+            if file.filename:
+                file.save(os.path.join(abs_path, os.path.basename(file.filename)))
+    except OSError as e:
+        return jsonify({'error': str(e)}), 500
     return jsonify({'success': True})
 
 @app.route('/api/files/delete', methods=['POST'])
 def delete_files():
     # "Eliminar" mueve a la papelera; el borrado definitivo se hace desde /api/trash/delete
-    paths = (request.json or {}).get('paths', [])
+    data = request.json or {}
+    drive = data.get('drive') or 'sistema'
+    root = drive_root(drive)
+    if not root:
+        return jsonify(NO_DRIVE[0]), NO_DRIVE[1]
+    dname = next((d['name'] for d in detect_drives() if d['id'] == drive), drive)
     with db_lock:
         trash, favs = db_load(TRASH_DB), db_load(FAV_DB)
-        for p in paths:
-            abs_p = safe_path(p)
-            if abs_p == STORAGE_ROOT or not os.path.exists(abs_p):
+        for p in data.get('paths', []):
+            abs_p = safe_path(p, root)
+            if abs_p == root or not os.path.exists(abs_p):
                 continue
-            rel, name, is_dir = rel_of(abs_p), os.path.basename(abs_p), os.path.isdir(abs_p)
+            rel, name, is_dir = rel_of(abs_p, root), os.path.basename(abs_p), os.path.isdir(abs_p)
             size = 0 if is_dir else os.path.getsize(abs_p)
             tid = uuid.uuid4().hex
             os.makedirs(os.path.join(TRASH_DIR, tid))
-            shutil.move(abs_p, os.path.join(TRASH_DIR, tid, name))
-            trash.append({'id': tid, 'n': name, 't': 'dir' if is_dir else get_file_type(name),
-                          's': size, 'o': rel, 'd': time.strftime('%Y-%m-%d'), 'm': time.time()})
-            favs = [f for f in favs if f != rel and not f.startswith(rel + '/')]
+            try:
+                shutil.move(abs_p, os.path.join(TRASH_DIR, tid, name))
+            except OSError:
+                shutil.rmtree(os.path.join(TRASH_DIR, tid), ignore_errors=True)
+                continue
+            trash.append({'id': tid, 'n': name, 't': 'dir' if is_dir else get_file_type(name), 's': size,
+                          'o': rel, 'dr': drive, 'dn': dname, 'd': time.strftime('%Y-%m-%d'), 'm': time.time()})
+            if root == STORAGE_ROOT:
+                favs = [f for f in favs if f != rel and not f.startswith(rel + '/')]
         db_save(TRASH_DB, trash)
         db_save(FAV_DB, favs)
     return jsonify({'success': True})
@@ -311,17 +369,17 @@ def trash_restore():
             src = os.path.join(TRASH_DIR, it['id'], it['n'])
             if not os.path.exists(src):
                 continue  # ya no existe en disco: se descarta de la lista
-            dest = safe_path(it['o'])
-            if dest == STORAGE_ROOT:
-                dest = os.path.join(STORAGE_ROOT, it['n'])
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            root = drive_root(it.get('dr'))
+            if not root:  # la unidad no está conectada: se conserva para restaurar después
+                keep.append(it)
+                continue
+            dest = safe_path(it['o'], root)
+            if dest == root:
+                dest = os.path.join(root, it['n'])
             if os.path.exists(dest):  # si ya hay algo con ese nombre, no se sobrescribe
-                base, ext = os.path.splitext(dest)
-                n = 1
-                while os.path.exists(f"{base} (restaurado {n}){ext}"):
-                    n += 1
-                dest = f"{base} (restaurado {n}){ext}"
+                dest = unique_dest(os.path.dirname(dest), it['n'], 'restaurado')
             try:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
                 shutil.move(src, dest)
                 shutil.rmtree(os.path.join(TRASH_DIR, it['id']), ignore_errors=True)
             except OSError:
@@ -358,6 +416,52 @@ def copy_files():
             else:
                 shutil.copy(abs_p, new_p)
     return jsonify({'success': True})
+
+def unique_dest(folder, name, tag):
+    base, ext = os.path.splitext(name)
+    if os.path.isdir(os.path.join(folder, name)):
+        base, ext = name, ''
+    cand, n = os.path.join(folder, f"{base} ({tag}){ext}"), 2
+    while os.path.exists(cand):
+        cand = os.path.join(folder, f"{base} ({tag} {n}){ext}")
+        n += 1
+    return cand
+
+@app.route('/api/files/paste', methods=['POST'])
+def paste_files():
+    # Pega (copiar o mover) archivos/carpetas, también entre unidades distintas
+    data = request.json or {}
+    src_root, dst_root = drive_root(data.get('src_drive')), drive_root(data.get('dest_drive'))
+    if not src_root or not dst_root:
+        return jsonify(NO_DRIVE[0]), NO_DRIVE[1]
+    dest_dir = safe_path(data.get('dest_path', ''), dst_root)
+    if not os.path.isdir(dest_dir):
+        return jsonify({'error': 'Carpeta destino no encontrada'}), 404
+    move = data.get('mode') == 'move'
+    done = errors = 0
+    for p in data.get('paths', []):
+        src = safe_path(p, src_root)
+        if src == src_root or not os.path.exists(src):
+            continue
+        if os.path.isdir(src) and _under(dest_dir, src):
+            errors += 1  # no se puede pegar una carpeta dentro de sí misma
+            continue
+        dest = os.path.join(dest_dir, os.path.basename(src))
+        if move and os.path.abspath(src) == os.path.abspath(dest):
+            continue  # mover a la misma carpeta: nada que hacer
+        if os.path.exists(dest):
+            dest = unique_dest(dest_dir, os.path.basename(src), 'movido' if move else 'copia')
+        try:
+            if move:
+                shutil.move(src, dest)
+            elif os.path.isdir(src):
+                shutil.copytree(src, dest, copy_function=shutil.copy)
+            else:
+                shutil.copy(src, dest)
+            done += 1
+        except OSError:
+            errors += 1
+    return jsonify({'success': True, 'done': done, 'errors': errors})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
