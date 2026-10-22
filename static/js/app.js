@@ -27,7 +27,8 @@ const I = {
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>',
   playc: '<circle cx="12" cy="12" r="10"/><path d="M10 8l6 4-6 4z"/>',
   rew: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>',
-  ff: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/>'
+  ff: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>'
 };
 
 /* ---------- Estado y variables globales ---------- */
@@ -38,7 +39,7 @@ let loading = false, loadTok = 0, DOCKER = false;
 const isDrv = () => view === 'unidades' && !!drv;                 // dentro de una unidad
 const curDrive = () => (view === 'unidades' && drv) || 'sistema';
 const isFiles = () => view === 'unidades' ? isDrv() : (!VIEWS[view].k || VIEWS[view].k === 'trash');
-const curActs = () => isDrv() ? ['crear', 'copiar', 'subir', 'mover', 'pegar', 'eliminar'] : (VIEWS[view].a || []);
+const curActs = () => isDrv() ? ['crear', 'copiar', 'subir', 'descargar', 'mover', 'pegar', 'eliminar'] : (VIEWS[view].a || []);
 const sel = new Set();
 const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fd = d => d.split('-').reverse().join('/');
@@ -58,19 +59,19 @@ function toast(m) {
 const RAIL = [['inicio', 'Inicio', 'home'], ['favoritos', 'Favoritos', 'star'], ['imagenes', 'Imágenes', 'img'], ['videos', 'Videos', 'vid']];
 const MENU = [['recientes', 'Recientes'], ['todos', 'Todos los archivos/carpetas'], ['rendimiento', 'Rendimiento'], ['papelera', 'Papelera'], ['unidades', 'Unidades de almacenamiento']];
 const VIEWS = {
-  inicio: { t: 'Inicio', a: ['crear', 'copiar', 'subir', 'mover', 'pegar', 'eliminar'] },
+  inicio: { t: 'Inicio', a: ['crear', 'copiar', 'subir', 'descargar', 'mover', 'pegar', 'eliminar'] },
   favoritos: { t: 'Favoritos', a: ['quitar'] },
-  imagenes: { t: 'Imágenes', a: ['copiar', 'eliminar'] },
-  videos: { t: 'Videos', a: ['copiar', 'eliminar'] },
-  recientes: { t: 'Recientes', a: ['copiar', 'eliminar'] },
-  todos: { t: 'Todos los archivos', a: ['copiar', 'eliminar'] },
+  imagenes: { t: 'Imágenes', a: ['copiar', 'descargar', 'eliminar'] },
+  videos: { t: 'Videos', a: ['copiar', 'descargar', 'eliminar'] },
+  recientes: { t: 'Recientes', a: ['copiar', 'descargar', 'eliminar'] },
+  todos: { t: 'Todos los archivos', a: ['copiar', 'descargar', 'eliminar'] },
   papelera: { t: 'Papelera', k: 'trash', a: ['restaurar', 'borrar', 'vaciar'] },
   rendimiento: { t: 'Rendimiento', k: 'perf' },
   unidades: { t: 'Unidades de almacenamiento', k: 'disks' }
 };
 const ACT = {
   crear: ['Crear', I.plus, 0], copiar: ['Copiar', I.copy, 1], subir: ['Subir', I.up, 0], mover: ['Mover', I.move, 1],
-  eliminar: ['Eliminar', I.trash, 1], agregar: ['Agregar', I.plus, 0], pegar: ['Pegar', I.paste, 2], quitar: ['Eliminar de Favoritos', I.trash, 1],
+  eliminar: ['Eliminar', I.trash, 1], agregar: ['Agregar', I.plus, 0], pegar: ['Pegar', I.paste, 2], descargar: ['Descargar', I.download, 1], quitar: ['Eliminar de Favoritos', I.trash, 1],
   restaurar: ['Restaurar', I.undo, 1], borrar: ['Eliminar definitivamente', I.trash, 1], vaciar: ['Vaciar papelera', I.trash, 0]
 };
 
@@ -293,6 +294,7 @@ async function toggleFav(p) {
 function run(a) {
   const paths = Array.from(sel), n = paths.length, dr = curDrive();
   if (a === 'subir') return $('up').click();
+  if (a === 'descargar') return downloadSelected(paths, dr);
   if (a === 'copiar' || a === 'mover') {
     CLIP = { mode: a === 'mover' ? 'move' : 'copy', drive: dr, paths };
     sel.clear(); render();
@@ -317,19 +319,113 @@ function run(a) {
   else if (a === 'vaciar') { if (SERVER_FILES.length && confirm('¿Vaciar la papelera? No se puede deshacer.')) act('/api/trash/delete', { all: true }, 'Papelera vaciada'); }
 }
 
-async function uploadFiles(filesList) {
-  const formData = new FormData();
-  formData.append('path', cwd);
-  formData.append('drive', curDrive());
-  for (let i = 0; i < filesList.length; i++) {
-    formData.append('files', filesList[i]);
+function downloadSelected(paths, dr) {
+  const files = paths.filter(p => SERVER_FILES.some(x => x.p === p && x.t !== 'dir'));
+  if (!files.length) return toast('Por ahora solo se pueden descargar archivos, no carpetas.');
+  files.forEach((p, n) => setTimeout(() => {
+    const a = document.createElement('a');
+    a.href = `/api/files/download?drive=${encodeURIComponent(dr)}&path=${encodeURIComponent(p)}`;
+    a.download = '';
+    document.body.appendChild(a); a.click(); a.remove();
+  }, n * 500));
+  toast(files.length < paths.length ? `Descargando ${files.length} archivo(s); las carpetas se omiten.` : files.length === 1 ? 'Descarga iniciada' : `Descargando ${files.length} archivos`);
+}
+
+/* ---------- Subida por partes (soporta archivos de decenas de GB y se puede reanudar) ---------- */
+const CHUNK = 16 * 1024 * 1024;
+const UP = { active: false, cancel: false, xhr: null, lock: null, timer: null };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const upKey = f => `${f.name}|${f.size}|${f.lastModified}`;
+const fmtEta = s => s < 60 ? `${Math.ceil(s)} s` : s < 3600 ? `${Math.ceil(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.ceil(s % 3600 / 60)} min`;
+
+// Aviso del navegador si se intenta cerrar o recargar la pestaña mientras se sube
+window.addEventListener('beforeunload', e => { if (UP.active) { e.preventDefault(); e.returnValue = ''; } });
+
+document.body.insertAdjacentHTML('beforeend', `<div id="upbox" role="status" aria-live="polite" class="hidden fixed bottom-20 left-5 right-5 sm:left-auto sm:w-96 z-30 rounded-2xl border border-white/15 bg-[#141c36] p-4 shadow-xl">
+  <div class="flex items-start justify-between gap-3"><p id="upt" class="text-sm font-semibold truncate"></p><button id="upc" class="shrink-0 text-xs rounded-full border border-white/25 px-3 py-1 text-white/80 hover:text-white hover:bg-white/10">Cancelar</button></div>
+  <div id="upp" class="h-2 rounded-full bg-white/10 overflow-hidden my-3" role="progressbar" aria-label="Progreso de la subida" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="upf" class="h-full grad rounded-full transition-[width] duration-200" style="width:0%"></div></div>
+  <p id="upd" class="text-xs text-white/60"></p></div>`);
+$('upc').addEventListener('click', () => { UP.cancel = true; if (UP.xhr) UP.xhr.abort(); });
+
+function upShow(title, pct, detail, cancelable = true) {
+  clearTimeout(UP.timer);
+  $('upbox').classList.remove('hidden');
+  $('upt').textContent = title; $('upd').textContent = detail;
+  $('upf').style.width = pct + '%'; $('upp').setAttribute('aria-valuenow', Math.round(pct));
+  $('upc').classList.toggle('hidden', !cancelable);
+}
+const upHideLater = ms => { clearTimeout(UP.timer); UP.timer = setTimeout(() => { if (!UP.active) $('upbox').classList.add('hidden'); }, ms); };
+
+const sendChunk = (url, blob, onProg) => new Promise(res => {
+  const x = new XMLHttpRequest(); UP.xhr = x;
+  x.open('POST', url);
+  x.upload.onprogress = e => onProg(e.loaded);
+  x.onload = () => { let r = {}; try { r = JSON.parse(x.responseText); } catch (e) { } res({ status: x.status, json: r }); };
+  x.onerror = x.ontimeout = x.onabort = () => res({ status: 0, json: {} });
+  x.send(blob);
+});
+
+async function uploadOne(f, dest, onProg) {
+  const qs = (o = {}) => new URLSearchParams({ drive: dest.drive, path: dest.path, name: f.name, key: upKey(f), size: f.size, ...o });
+  const remote = async () => { // cuánto ya tiene el servidor (permite reanudar)
+    try { const r = await fetch('/api/files/upload/status?' + qs(), { cache: 'no-store' }); const n = (await r.json()).size || 0; return n <= f.size ? n : 0; } catch (e) { return 0; }
+  };
+  let off = await remote(), fails = 0;
+  const start = off;
+  onProg(off, start);
+  while (true) {
+    if (UP.cancel) throw new Error('cancelado');
+    const end = Math.min(off + CHUNK, f.size);
+    const r = await sendChunk('/api/files/upload/chunk?' + qs({ offset: off }), f.slice(off, end), l => onProg(off + l, start));
+    if (r.status === 200) {
+      fails = 0;
+      if (r.json.done) { onProg(f.size, start); return; }
+      off = r.json.received ?? end; onProg(off, start);
+    } else if (r.status === 409) off = r.json.size || 0;
+    else if (UP.cancel) throw new Error('cancelado');
+    else if (r.status === 0 || (r.status >= 500 && r.status !== 507)) {
+      if (++fails > 8) throw new Error('Se perdió la conexión con el servidor');
+      onProg(off, start, `Sin conexión. Reintentando (${fails}/8)…`);
+      await sleep(Math.min(20000, 1000 * 2 ** fails));
+      off = await remote();
+    } else throw new Error(r.json.error || 'El servidor rechazó la subida');
   }
-  toast('Subiendo archivo(s)...');
-  try {
-    const res = await fetch('/api/files/upload', { method: 'POST', body: formData });
-    if (res.ok) { toast('Subida completada'); loadFiles(); }
-    else toast('Error al subir');
-  } catch (e) { toast('Error de red al subir'); }
+}
+
+async function uploadFiles(fileList) {
+  const files = [...fileList];
+  if (!files.length) return;
+  if (UP.active) return toast('Ya hay una subida en curso.');
+  const dest = { drive: curDrive(), path: cwd }, total = files.reduce((a, f) => a + f.size, 0);
+  let done = 0, resumed = 0, lastStart = 0, ok = 0, failed = null, pct = 0;
+  UP.active = true; UP.cancel = false;
+  try { UP.lock = await navigator.wakeLock?.request('screen'); } catch (e) { UP.lock = null; } // pantalla encendida (solo con HTTPS)
+  const t0 = Date.now();
+  for (let i = 0; i < files.length && !failed; i++) {
+    const f = files[i];
+    try {
+      await uploadOne(f, dest, (cur, start, note) => {
+        lastStart = start;
+        const sent = done + cur, el = (Date.now() - t0) / 1000;
+        const speed = el > 1 ? Math.max(0, (done - resumed) + (cur - start)) / el : 0;
+        pct = total ? sent / total * 100 : 100;
+        const eta = speed > 0 ? (total - sent) / speed : 0;
+        upShow(`Subiendo ${files.length > 1 ? `${i + 1} de ${files.length}: ` : ''}${f.name}`, pct,
+          note || `${fmt(sent)} de ${fmt(total)} · ${Math.round(pct)} %` + (speed ? ` · ${fmt(speed)}/s` : '') + (eta ? ` · quedan ${fmtEta(eta)}` : ''));
+      });
+      done += f.size; resumed += lastStart; ok++;
+    } catch (e) {
+      failed = e;
+      if (UP.cancel) await fetch('/api/files/upload/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ drive: dest.drive, path: dest.path, name: f.name, key: upKey(f) }) }).catch(() => { });
+    }
+  }
+  UP.active = false; UP.xhr = null;
+  try { if (UP.lock) UP.lock.release(); } catch (e) { }
+  UP.lock = null;
+  if (failed && UP.cancel) { upShow('Subida cancelada', pct, ok ? `${ok} archivo(s) ya se subieron.` : '', false); upHideLater(3000); }
+  else if (failed) { upShow('La subida se interrumpió', pct, `${failed.message}. Vuelve a elegir el archivo y continuará donde quedó.`, false); upHideLater(20000); }
+  else { upShow('Subida completada', 100, `${ok} archivo${ok > 1 ? 's' : ''} · ${fmt(total)}`, false); upHideLater(4000); }
+  if (isFiles()) loadFiles();
 }
 
 /* ---------- Delegación de Eventos ---------- */

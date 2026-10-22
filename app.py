@@ -264,7 +264,7 @@ def make_item(abs_p, favs, root=None):
 def walk_items(favs):
     for root, dirs, files in os.walk(STORAGE_ROOT):
         dirs[:] = [d for d in dirs if not (root == STORAGE_ROOT and d == META_NAME)]
-        for n in dirs + files:
+        for n in dirs + [f for f in files if not f.endswith('.nasup')]:
             try:
                 yield make_item(os.path.join(root, n), favs)
             except OSError:
@@ -282,7 +282,7 @@ def list_files():
     items = []
     try:
         for entry in os.scandir(abs_path):
-            if root == STORAGE_ROOT and abs_path == root and entry.name == META_NAME:
+            if (root == STORAGE_ROOT and abs_path == root and entry.name == META_NAME) or entry.name.endswith('.nasup'):
                 continue
             try:
                 items.append(make_item(entry.path, favs, root))
@@ -462,6 +462,92 @@ def copy_files():
             else:
                 shutil.copy(abs_p, new_p)
     return jsonify({'success': True})
+
+# --- SUBIDA POR PARTES (archivos de decenas de GB, con reanudación) ---
+# El cliente envía el archivo en trozos; cada trozo se agrega a un archivo temporal
+# oculto (.xxxx.nasup) en la carpeta destino y al terminar se renombra (sin copiar de nuevo).
+def _part_path(dest_dir, key):
+    return os.path.join(dest_dir, '.' + hashlib.sha1(key.encode()).hexdigest()[:16] + '.nasup')
+
+def _upload_ctx(args):
+    root = drive_root(args.get('drive'))
+    if not root:
+        return None, (NO_DRIVE[0], 404)
+    dest_dir = safe_path(args.get('path', ''), root)
+    name = os.path.basename((args.get('name') or '').strip())
+    if not os.path.isdir(dest_dir) or name in ('', '.', '..') or not args.get('key'):
+        return None, ({'error': 'Datos de subida inválidos'}, 400)
+    return (dest_dir, name, _part_path(dest_dir, args['key'])), None
+
+@app.route('/api/files/upload/status', methods=['GET'])
+def upload_status():
+    ctx, err = _upload_ctx(request.args)
+    if err:
+        return jsonify(err[0]), err[1]
+    part = ctx[2]
+    return jsonify({'size': os.path.getsize(part) if os.path.exists(part) else 0})
+
+@app.route('/api/files/upload/chunk', methods=['POST'])
+def upload_chunk():
+    ctx, err = _upload_ctx(request.args)
+    if err:
+        return jsonify(err[0]), err[1]
+    dest_dir, name, part = ctx
+    try:
+        offset, size = int(request.args['offset']), int(request.args['size'])
+    except (KeyError, ValueError):
+        return jsonify({'error': 'Parámetros inválidos'}), 400
+    have = os.path.getsize(part) if os.path.exists(part) else 0
+    if offset > 0 and have != offset:
+        return jsonify({'error': 'Desfase en la subida', 'size': have}), 409
+    if offset == 0:
+        if shutil.disk_usage(dest_dir).free < size:
+            return jsonify({'error': f'No hay espacio suficiente en la unidad (faltan {(size - shutil.disk_usage(dest_dir).free) // 1048576} MB)'}), 507
+        for e in os.scandir(dest_dir):  # limpia subidas abandonadas hace más de 3 días
+            if e.name.endswith('.nasup') and time.time() - e.stat().st_mtime > 3 * 86400:
+                os.remove(e.path)
+    try:
+        with open(part, 'wb' if offset == 0 else 'ab') as f:
+            while True:
+                buf = request.stream.read(1 << 20)
+                if not buf:
+                    break
+                f.write(buf)
+    except OSError:
+        return jsonify({'error': 'No se pudo escribir en el disco'}), 500
+    except Exception:
+        return jsonify({'error': 'Conexión interrumpida'}), 400
+    got = os.path.getsize(part)
+    if got > size:
+        os.remove(part)
+        return jsonify({'error': 'El archivo recibido es mayor de lo esperado'}), 400
+    if got < size:
+        return jsonify({'done': False, 'received': got})
+    final = os.path.join(dest_dir, name)
+    if os.path.exists(final):  # no se sobrescribe nada existente
+        final = unique_dest(dest_dir, name, 'copia')
+    os.replace(part, final)
+    return jsonify({'done': True, 'name': os.path.basename(final)})
+
+@app.route('/api/files/upload/cancel', methods=['POST'])
+def upload_cancel():
+    ctx, err = _upload_ctx(request.json or {})
+    if not err and os.path.exists(ctx[2]):
+        os.remove(ctx[2])
+    return jsonify({'success': True})
+
+@app.route('/api/files/download', methods=['GET'])
+def download_file():
+    root = drive_root(request.args.get('drive'))
+    if not root:
+        return jsonify(NO_DRIVE[0]), NO_DRIVE[1]
+    abs_p = safe_path(request.args.get('path', ''), root)
+    if abs_p == root or not os.path.isfile(abs_p):
+        return jsonify({'error': 'Archivo no encontrado'}), 404
+    resp = send_file(abs_p, as_attachment=True, download_name=os.path.basename(abs_p), conditional=True, max_age=0)
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['Content-Security-Policy'] = 'sandbox'
+    return resp
 
 @app.route('/api/files/stream', methods=['GET'])
 def stream_file():
