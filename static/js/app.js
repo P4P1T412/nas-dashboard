@@ -430,7 +430,7 @@ async function uploadFiles(fileList) {
 
 /* ---------- Delegación de Eventos ---------- */
 /* ---------- Visor de imágenes y videos ---------- */
-document.head.insertAdjacentHTML('beforeend', '<style>#vbox:fullscreen{max-width:none;max-height:none;height:100%;border-radius:0;border:0}#vbox:fullscreen video{max-height:none;height:calc(100vh - 7rem)}#vbox:fullscreen img{max-height:calc(100vh - 6rem)}</style>');
+document.head.insertAdjacentHTML('beforeend', '<style>#vbox:fullscreen{max-width:none;max-height:none;height:100%;border-radius:0;border:0}#vbox:fullscreen video{max-height:none;height:100vh}#vbox:fullscreen img{max-height:calc(100vh - 6rem)}.vseek{-webkit-appearance:none;appearance:none;background:transparent;height:1.5rem;cursor:pointer}.vseek::-webkit-slider-runnable-track{height:.3rem;background:transparent}.vseek::-moz-range-track{height:.3rem;background:transparent}.vseek::-webkit-slider-thumb{-webkit-appearance:none;width:.9rem;height:.9rem;margin-top:-.3rem;border-radius:9999px;background:#fff}.vseek::-moz-range-thumb{width:.9rem;height:.9rem;border:0;border-radius:9999px;background:#fff}</style>');
 let VW = null;
 const VB = 'relative shrink-0 p-2 rounded-lg text-white/80 hover:text-white hover:bg-white/10';
 const mediaUrl = p => `/api/files/stream?drive=${encodeURIComponent(curDrive())}&path=${encodeURIComponent(p)}`;
@@ -439,6 +439,7 @@ const tag10 = '<span class="absolute inset-0 grid place-items-center text-[9px] 
 
 function closeViewer() {
   if (!VW) return;
+  if (VW.ov.cleanup) VW.ov.cleanup();
   const v = VW.ov.querySelector('video');
   if (v) { v.pause(); v.removeAttribute('src'); v.load(); } // corta la descarga en curso
   if (document.fullscreenElement) document.exitFullscreen();
@@ -449,25 +450,69 @@ function closeViewer() {
   VW = null;
 }
 
+const PRE_OPTS = [0, 60, 300, 600]; // segundos de video a precargar antes de reproducir
 function setupVideo(ov, toggleFs) {
-  const q = s => ov.querySelector(s), v = q('video'), pp = q('[data-pp]'), sk = q('[data-seek]');
+  const q = s => ov.querySelector(s), v = q('video'), pp = q('[data-pp]'), sk = q('[data-seek]'), box = ov.firstElementChild;
+  const ld = q('[data-load]'), ldt = q('[data-ldt]'), uis = ov.querySelectorAll('[data-ui]'), buf = q('[data-buf]'), played = q('[data-played]'), preBtn = q('[data-pre]');
+  let pre = 600;
+  try { const s = localStorage.getItem('nas.pre'); if (s !== null && PRE_OPTS.includes(+s)) pre = +s; } catch (e) { }
+  let seeking = false, hidden = false, overUi = false, wasHidden = false, hideT = null, fill = null;
+
   const skip = d => { if (v.duration) v.currentTime = Math.min(v.duration, Math.max(0, v.currentTime + d)); };
   const toggle = () => v.paused ? v.play().catch(() => {}) : v.pause();
-  const icon = () => pp.innerHTML = ic(v.paused ? I.play : I.pause, 'w-6 h-6');
-  let seeking = false;
-  icon();
-  ['play', 'pause', 'ended'].forEach(ev => v.addEventListener(ev, icon));
+  const icon = () => pp.innerHTML = ic(v.paused ? I.play : I.pause, 'w-7 h-7');
+  const bufEnd = () => { const b = v.buffered, t = v.currentTime; let e = 0; for (let n = 0; n < b.length; n++) if (t >= b.start(n) - 0.3 && t <= b.end(n)) e = b.end(n); return e; };
+  const ahead = () => Math.max(0, bufEnd() - v.currentTime);
+  const paint = () => { const d = v.duration || 0; buf.style.width = d ? Math.max(bufEnd(), v.currentTime) / d * 100 + '%' : '0%'; played.style.width = d ? v.currentTime / d * 100 + '%' : '0%'; };
+  const preText = () => { q('[data-prel]').textContent = pre ? `${pre / 60} min` : 'No'; preBtn.title = pre ? `Precarga ${pre / 60} min antes de reproducir (clic para cambiar)` : 'Sin precarga: reproduce de inmediato (clic para cambiar)'; };
+
+  // Controles que se desvanecen a los 8 s mientras se reproduce; reaparecen al mover el mouse, tocar o pulsar una tecla
+  const setUi = vis => { hidden = !vis; uis.forEach(e => { e.classList.toggle('opacity-0', !vis); e.classList.toggle('pointer-events-none', !vis); }); box.style.cursor = vis ? '' : 'none'; };
+  const show = () => {
+    if (hidden) setUi(true);
+    clearTimeout(hideT);
+    if (!v.paused && !seeking && !overUi && !fill) hideT = setTimeout(() => setUi(false), 8000);
+  };
+
+  // Precarga: espera a tener X segundos de video cargados por delante (o a que el navegador deje de cargar)
+  const endFill = play => { if (!fill) return; clearInterval(fill.timer); fill = null; ld.classList.add('hidden'); if (play) v.play().catch(() => {}); show(); };
+  const startFill = secs => {
+    if (fill || !secs) return;
+    v.pause();
+    fill = { best: ahead(), at: Date.now() };
+    ld.classList.remove('hidden'); setUi(true); clearTimeout(hideT);
+    const tick = () => {
+      const goal = Math.min(secs, (v.duration || secs) - v.currentTime), a = ahead();
+      if (a > fill.best + 1) { fill.best = a; fill.at = Date.now(); }
+      ldt.textContent = `Precargando ${fmtT(a)} de ${fmtT(goal)}`;
+      if (a >= goal - 1 || Date.now() - fill.at > 8000) endFill(true);
+    };
+    fill.timer = setInterval(tick, 500); tick();
+  };
+
+  icon(); preText();
+  ['play', 'pause', 'ended'].forEach(ev => v.addEventListener(ev, () => { icon(); show(); }));
+  ['progress', 'timeupdate', 'loadedmetadata', 'seeked'].forEach(ev => v.addEventListener(ev, paint));
   v.addEventListener('loadedmetadata', () => q('[data-dur]').textContent = fmtT(v.duration));
   v.addEventListener('timeupdate', () => { q('[data-cur]').textContent = fmtT(v.currentTime); if (!seeking && v.duration) sk.value = v.currentTime / v.duration * 1000; });
-  v.addEventListener('error', () => { const m = q('[data-err]'); m.textContent = 'Este navegador no puede reproducir este video. Prueba con MP4 (H.264) o WebM.'; m.classList.remove('hidden'); });
+  v.addEventListener('waiting', () => { if (!v.seeking && !fill) startFill(Math.min(pre, 120)); }); // si se queda sin datos, recarga un rato antes de seguir
+  v.addEventListener('error', () => { endFill(false); const m = q('[data-err]'); m.textContent = 'Este navegador no puede reproducir este video. Prueba con MP4 (H.264) o WebM.'; m.classList.remove('hidden'); });
   sk.addEventListener('input', () => { seeking = true; if (v.duration) v.currentTime = sk.value / 1000 * v.duration; });
-  sk.addEventListener('change', () => seeking = false);
+  sk.addEventListener('change', () => { seeking = false; show(); });
   q('[data-b10]').onclick = () => skip(-10);
   q('[data-f10]').onclick = () => skip(10);
-  pp.onclick = v.onclick = toggle;
+  q('[data-ldskip]').onclick = () => endFill(true);
+  preBtn.onclick = () => { pre = PRE_OPTS[(PRE_OPTS.indexOf(pre) + 1) % PRE_OPTS.length]; try { localStorage.setItem('nas.pre', pre); } catch (e) { } preText(); };
+  pp.onclick = toggle;
+  v.onclick = () => { if (wasHidden) { wasHidden = false; return; } toggle(); }; // el primer toque con los controles ocultos solo los muestra
   v.ondblclick = toggleFs;
-  v.play().catch(() => {});
+  ov.addEventListener('pointermove', show);
+  ov.addEventListener('pointerdown', () => { wasHidden = hidden; show(); }, true);
+  uis.forEach(e => { e.addEventListener('pointerenter', () => { overUi = true; show(); }); e.addEventListener('pointerleave', () => { overUi = false; show(); }); });
+  ov.cleanup = () => { clearTimeout(hideT); if (fill) clearInterval(fill.timer); };
+  if (pre) startFill(pre); else v.play().catch(() => {});
   return e => {
+    show();
     const free = !['BUTTON', 'INPUT'].includes(e.target.tagName);
     if (e.key === ' ' && free) { e.preventDefault(); toggle(); }
     else if (e.key === 'ArrowLeft' && e.target.tagName !== 'INPUT') skip(-10);
@@ -510,21 +555,36 @@ function openViewer(x) {
   const fsBtn = `<button data-fs class="${VB}" aria-label="Pantalla completa" title="Pantalla completa (F)">${ic(I.expand, 'w-5 h-5')}</button>`;
   const xBtn = `<button data-vx class="${VB}" aria-label="Cerrar" title="Cerrar (Esc)">${ic(I.close, 'w-6 h-6')}</button>`;
   const err = '<p data-err class="hidden absolute inset-0 grid place-items-center p-6 text-center text-white/80 bg-black/70"></p>';
+  const title = `<span class="font-semibold truncate flex-1 mr-2">${esc(x.n)}</span>`;
   const zoomBtns = `<button data-zo class="${VB}" aria-label="Alejar" title="Alejar (-)">${ic(I.zout, 'w-5 h-5')}</button><button data-zl class="px-2 text-sm tabular-nums text-white/80 hover:text-white" title="Restablecer zoom (0)">100%</button><button data-zi class="${VB}" aria-label="Acercar" title="Acercar (+)">${ic(I.zin, 'w-5 h-5')}</button>`;
-  ov.innerHTML = `<div id="vbox" class="w-full max-w-5xl max-h-full flex flex-col rounded-2xl border border-white/10 bg-[#0f1528] overflow-hidden">
-    <div class="flex items-center gap-1 px-4 py-2"><span class="font-semibold truncate flex-1 mr-2">${esc(x.n)}</span>${isVid ? '' : zoomBtns + fsBtn}${xBtn}</div>`
-    + (isVid
-      ? `<div class="relative flex-1 min-h-0 bg-black flex items-center justify-center"><video src="${url}" preload="metadata" playsinline class="w-full max-h-[70vh] cursor-pointer"></video>${err}</div>
-         <div class="flex items-center gap-1 px-3 py-2">
-           <button data-b10 class="${VB}" aria-label="Retroceder 10 segundos" title="Retroceder 10 s (←)">${ic(I.rew, 'w-6 h-6')}${tag10}</button>
-           <button data-pp class="${VB}" aria-label="Reproducir o pausar" title="Reproducir / pausar (Espacio)"></button>
-           <button data-f10 class="${VB}" aria-label="Adelantar 10 segundos" title="Adelantar 10 s (→)">${ic(I.ff, 'w-6 h-6')}${tag10}</button>
-           <span data-cur class="w-12 text-center text-xs tabular-nums text-white/70">0:00</span>
-           <input data-seek type="range" min="0" max="1000" step="1" value="0" aria-label="Progreso del video" class="flex-1 min-w-0 accent-pink-500">
-           <span data-dur class="w-12 text-center text-xs tabular-nums text-white/70">0:00</span>${fsBtn}
-         </div>`
-      : `<div data-wrap class="relative flex-1 min-h-0 bg-black/60 overflow-hidden flex items-center justify-center touch-none"><img data-img src="${url}" alt="${esc(x.n)}" draggable="false" class="max-w-full max-h-[78vh] object-contain select-none">${err}</div>`)
-    + '</div>';
+  const fade = 'transition-opacity duration-300';
+  ov.innerHTML = isVid
+    ? `<div id="vbox" class="relative w-full max-w-5xl max-h-full overflow-hidden rounded-2xl border border-white/10 bg-black">
+        <video src="${url}" preload="auto" playsinline class="block w-full max-h-[85vh] cursor-pointer"></video>
+        <div data-ui class="absolute inset-x-0 top-0 flex items-center gap-1 px-4 py-2 bg-gradient-to-b from-black/80 to-transparent ${fade}">${title}${xBtn}</div>
+        <div data-load class="hidden absolute inset-0 grid place-items-center pointer-events-none"><div class="pointer-events-auto rounded-2xl bg-black/75 px-5 py-4 text-center"><p data-ldt class="text-sm mb-3"></p><button data-ldskip class="rounded-full border border-white/30 px-4 py-1.5 text-sm hover:bg-white/10">Reproducir ya</button></div></div>
+        ${err}
+        <div data-ui class="absolute inset-x-0 bottom-0 px-3 pb-2 pt-10 bg-gradient-to-t from-black/85 to-transparent ${fade}">
+          <div class="flex items-center gap-2">
+            <span data-cur class="w-12 text-center text-xs tabular-nums text-white/80">0:00</span>
+            <div class="relative flex-1 min-w-0 h-6 flex items-center">
+              <div class="absolute inset-x-0 h-1.5 rounded-full bg-white/20 overflow-hidden"><div data-buf class="absolute inset-y-0 left-0 bg-white/35" style="width:0%"></div><div data-played class="absolute inset-y-0 left-0 grad" style="width:0%"></div></div>
+              <input data-seek type="range" min="0" max="1000" step="1" value="0" aria-label="Progreso del video" class="vseek relative w-full">
+            </div>
+            <span data-dur class="w-12 text-center text-xs tabular-nums text-white/80">0:00</span>
+          </div>
+          <div class="flex items-center gap-1">
+            <button data-b10 class="${VB}" aria-label="Retroceder 10 segundos" title="Retroceder 10 s (←)">${ic(I.rew, 'w-6 h-6')}${tag10}</button>
+            <button data-pp class="${VB}" aria-label="Reproducir o pausar" title="Reproducir / pausar (Espacio)"></button>
+            <button data-f10 class="${VB}" aria-label="Adelantar 10 segundos" title="Adelantar 10 s (→)">${ic(I.ff, 'w-6 h-6')}${tag10}</button>
+            <span class="flex-1"></span>
+            <button data-pre class="rounded-full border border-white/25 px-3 py-1 text-xs text-white/80 hover:text-white hover:bg-white/10"><span class="hidden sm:inline">Precarga </span><span data-prel></span></button>
+            ${fsBtn}
+          </div>
+        </div></div>`
+    : `<div id="vbox" class="w-full max-w-5xl max-h-full flex flex-col rounded-2xl border border-white/10 bg-[#0f1528] overflow-hidden">
+        <div class="flex items-center gap-1 px-4 py-2">${title}${zoomBtns}${fsBtn}${xBtn}</div>
+        <div data-wrap class="relative flex-1 min-h-0 bg-black/60 overflow-hidden flex items-center justify-center touch-none"><img data-img src="${url}" alt="${esc(x.n)}" draggable="false" class="max-w-full max-h-[78vh] object-contain select-none">${err}</div></div>`;
   document.body.appendChild(ov);
   document.body.style.overflow = 'hidden';
   const box = ov.firstElementChild;
